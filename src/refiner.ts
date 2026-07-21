@@ -184,7 +184,7 @@ export function parseRefinerResponse(
     }
     if (
       typeof proposal.componentKind !== "string" ||
-      !COMPONENT_KINDS[proposal.componentKind as ComponentKind]
+      !Object.hasOwn(COMPONENT_KINDS, proposal.componentKind)
     )
       throw new TypeError(`proposal[${index}].componentKind is invalid`);
     if (

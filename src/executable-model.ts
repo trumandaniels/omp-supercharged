@@ -25,10 +25,9 @@ function assertExactKeys(
   allowed: readonly string[],
   context: string,
 ): void {
-  const table: Record<string, true> = {};
-  for (const key of allowed) table[key] = true;
+  const keys = new Set(allowed);
   for (const key of Object.keys(value))
-    if (!table[key])
+    if (!keys.has(key))
       throw new TypeError(`${context} contains unknown field ${key}`);
 }
 
@@ -68,10 +67,10 @@ export function validateStateGraphModel(value: unknown): StateGraphModelV1 {
   const stateNames = Object.keys(states);
   if (stateNames.length === 0 || stateNames.length > MAX_STATES)
     throw new TypeError(`model.states must contain 1-${MAX_STATES} states`);
-  const stateLookup: Record<string, true> = {};
+  const stateLookup = new Set<string>();
   const observationHashes = new Set<string>();
   for (const name of stateNames) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(name))
+    if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/.test(name))
       throw new TypeError(`Invalid state name ${name}`);
     const encoded = canonicalJson(states[name]);
     if (encoded.length > MAX_OBSERVATION_BYTES)
@@ -84,9 +83,9 @@ export function validateStateGraphModel(value: unknown): StateGraphModelV1 {
         `State ${name} duplicates another rendered observation, making reconstruction ambiguous`,
       );
     observationHashes.add(hash);
-    stateLookup[name] = true;
+    stateLookup.add(name);
   }
-  if (!stateLookup[model.initialState])
+  if (!stateLookup.has(model.initialState))
     throw new TypeError("model.initialState does not exist");
   if (
     !Array.isArray(model.transitions) ||
@@ -106,7 +105,7 @@ export function validateStateGraphModel(value: unknown): StateGraphModelV1 {
     assertNonEmptyString(transition.from, `transition[${index}].from`, 100);
     assertNonEmptyString(transition.action, `transition[${index}].action`, 200);
     assertNonEmptyString(transition.to, `transition[${index}].to`, 100);
-    if (!stateLookup[transition.from] || !stateLookup[transition.to])
+    if (!stateLookup.has(transition.from) || !stateLookup.has(transition.to))
       throw new TypeError(`Transition ${index} references an unknown state`);
     const key = `${transition.from}\u0000${transition.action}`;
     if (transitionKeys.has(key))
@@ -125,7 +124,7 @@ export function validateStateGraphModel(value: unknown): StateGraphModelV1 {
   const goalSeen = new Set<string>();
   const goalStates = model.goalStates.map((goal, index) => {
     assertNonEmptyString(goal, `goalStates[${index}]`, 100);
-    if (!stateLookup[goal])
+    if (!stateLookup.has(goal))
       throw new TypeError(`Goal state ${goal} does not exist`);
     if (goalSeen.has(goal)) throw new TypeError(`Duplicate goal state ${goal}`);
     goalSeen.add(goal);
@@ -190,12 +189,16 @@ export function reconstructState(
   return matches[0][0];
 }
 
+function hasOwnState(model: StateGraphModelV1, state: string): boolean {
+  return Object.hasOwn(model.states, state);
+}
+
 export function stepStateGraph(
   model: StateGraphModelV1,
   state: string,
   action: string,
 ): string {
-  if (!(state in model.states)) throw new TypeError(`Unknown state ${state}`);
+  if (!hasOwnState(model, state)) throw new TypeError(`Unknown state ${state}`);
   assertNonEmptyString(action, "action", 200);
   const transition = model.transitions.find(
     (candidate) => candidate.from === state && candidate.action === action,
@@ -208,7 +211,7 @@ export function renderState(
   model: StateGraphModelV1,
   state: string,
 ): JsonValue {
-  if (!(state in model.states)) throw new TypeError(`Unknown state ${state}`);
+  if (!hasOwnState(model, state)) throw new TypeError(`Unknown state ${state}`);
   return cloneJson(model.states[state]);
 }
 
@@ -217,14 +220,14 @@ export function planStateGraph(
   fromState: string,
   requestedGoal?: string,
 ): string[] {
-  if (!(fromState in model.states))
+  if (!hasOwnState(model, fromState))
     throw new TypeError(`Unknown state ${fromState}`);
   const goals =
     requestedGoal === undefined
       ? new Set(model.goalStates)
       : new Set([requestedGoal]);
   for (const goal of goals)
-    if (!(goal in model.states))
+    if (!hasOwnState(model, goal))
       throw new TypeError(`Unknown goal state ${goal}`);
   if (goals.has(fromState)) return [];
   const queue: Array<{ state: string; actions: string[] }> = [
@@ -300,7 +303,7 @@ export function simplifyStateGraph(
     )
       throw new Error(`Cannot simplify without dropping replay ${record.id}`);
   }
-  const states: Record<string, JsonValue> = {};
+  const states: Record<string, JsonValue> = Object.create(null);
   for (const [name, observation] of Object.entries(model.states))
     if (reachable.has(name)) states[name] = cloneJson(observation);
   return validateStateGraphModel({

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import {
   cp,
   mkdtemp,
@@ -9,17 +9,13 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  resolve,
-} from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, posix, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { canonicalJson, hashJson, isoNow, sha256Bytes } from "./canonical.ts";
 import { recoverLedger } from "./ledger.ts";
-import { validateManifest } from "./manifest.ts";
+import { deriveManifest } from "./manifest.ts";
+import { loadProjectPolicy } from "./policy.ts";
 import {
   ensurePrivateDirectory,
   resolveHarnessPaths,
@@ -27,6 +23,7 @@ import {
 } from "./paths.ts";
 import type {
   EvaluationExecutionIdentityV1,
+  EvaluationFailureClass,
   EvaluationConditionSummaryV1,
   EvaluationPolicyV1,
   EvaluationReportV1,
@@ -55,18 +52,21 @@ const CONDITION_ORDER: Record<EvaluationPolicyV1["condition"], number> = {
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
+function activeOmpAgentDirectory(): string {
+  const explicit = process.env.PI_CODING_AGENT_DIR?.trim();
+  if (explicit) return resolve(explicit);
+  const configuredRoot = process.env.PI_CONFIG_DIR?.trim();
+  const configRoot = configuredRoot
+    ? isAbsolute(configuredRoot)
+      ? configuredRoot
+      : join(homedir(), configuredRoot)
+    : join(homedir(), ".omp");
+  return join(configRoot, "agent");
+}
+
 const MAX_CAPTURE_BYTES = 32 * 1024 * 1024;
-const FORBIDDEN_BARE_PACKAGE_MANAGERS = new Set([
-  "npm",
-  "npx",
-  "pnpm",
-  "yarn",
-  "pip",
-  "pip3",
-  "uv",
-  "uvx",
-  "cargo",
-]);
+const PROCESS_TEARDOWN_LIMIT_MS = 5_000;
+const RUNTIME_ARTIFACT_PATHS = ["package.json", "src", "skills"] as const;
 
 interface EvaluationRunPlan {
   id: string;
@@ -89,6 +89,7 @@ interface OmpOutputMetrics {
   actions: number;
   modelRequests: number;
   inputTokens?: number;
+  modelErrors: number;
   outputTokens?: number;
   costUsd?: number;
   malformedLines: number;
@@ -98,9 +99,16 @@ interface ManifestEvidence {
   manifest?: RunManifestV1;
   reconstructionSucceeded: boolean;
   storageBytes: number;
+
   waivers: number;
   continuationDecisions: number;
 }
+
+const EVALUATION_FAILURE_CLASSES = new Set<EvaluationFailureClass>([
+  "provider",
+  "harness",
+  "task",
+]);
 
 interface EvaluationExecutionIdentity extends EvaluationExecutionIdentityV1 {
   specHash: string;
@@ -110,6 +118,12 @@ interface EvaluationSuiteSnapshot {
   root: string;
   suite: EvaluationSuiteV1;
   workspaceHash: string;
+}
+
+interface EvaluationHarnessSnapshot {
+  root: string;
+  harnessHash: string;
+  hardeningConfigHash: string;
 }
 
 export interface EvaluationRunnerOptions {
@@ -160,13 +174,19 @@ function assertExactKeys(
   }
 }
 
-function nonEmptyString(value: unknown, field: string, maxLength: number): string {
+function nonEmptyString(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string {
   if (
     typeof value !== "string" ||
     value.trim().length === 0 ||
     value.length > maxLength
   ) {
-    throw new TypeError(`${field} must be a non-empty string of at most ${maxLength} characters`);
+    throw new TypeError(
+      `${field} must be a non-empty string of at most ${maxLength} characters`,
+    );
   }
   return value.trim();
 }
@@ -183,7 +203,9 @@ function boundedInteger(
     value < minimum ||
     value > maximum
   ) {
-    throw new TypeError(`${field} must be an integer between ${minimum} and ${maximum}`);
+    throw new TypeError(
+      `${field} must be an integer between ${minimum} and ${maximum}`,
+    );
   }
   return value;
 }
@@ -196,7 +218,8 @@ function finiteNonNegative(value: unknown, field: string): number {
 }
 
 function booleanValue(value: unknown, field: string): boolean {
-  if (typeof value !== "boolean") throw new TypeError(`${field} must be boolean`);
+  if (typeof value !== "boolean")
+    throw new TypeError(`${field} must be boolean`);
   return value;
 }
 
@@ -208,7 +231,8 @@ function contentHash(value: unknown, field: string): string {
 }
 
 function timestamp(value: unknown, field: string): string {
-  if (typeof value !== "string") throw new TypeError(`${field} must be an ISO timestamp`);
+  if (typeof value !== "string")
+    throw new TypeError(`${field} must be an ISO timestamp`);
   const parsed = new Date(value);
   if (Number.isNaN(parsed.valueOf()) || parsed.toISOString() !== value) {
     throw new TypeError(`${field} must be an ISO timestamp`);
@@ -238,11 +262,52 @@ function parseStringArray(
   maxItems: number,
 ): string[] {
   if (!Array.isArray(value) || value.length > maxItems) {
-    throw new TypeError(`${field} must be an array with at most ${maxItems} entries`);
+    throw new TypeError(
+      `${field} must be an array with at most ${maxItems} entries`,
+    );
   }
   return value.map((item, index) =>
     nonEmptyString(item, `${field}[${index}]`, 4_000),
   );
+}
+
+function safeRelativeFilePath(value: unknown, field: string): string {
+  const path = nonEmptyString(value, field, 4_000);
+  if (
+    path !== value ||
+    path.includes("\\") ||
+    path.includes("\0") ||
+    path.startsWith("/") ||
+    /^[A-Za-z]:/u.test(path) ||
+    path === "." ||
+    path === ".." ||
+    path.startsWith("../") ||
+    path.endsWith("/") ||
+    posix.normalize(path) !== path ||
+    path
+      .split("/")
+      .some((part) => part.length === 0 || part === "." || part === "..")
+  ) {
+    throw new TypeError(
+      `${field} must be a normalized safe relative file path`,
+    );
+  }
+  return path;
+}
+
+function parseImmutablePaths(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
+    throw new TypeError(
+      `${field} must be a non-empty array with at most 100 entries`,
+    );
+  }
+  const paths = value.map((item, index) =>
+    safeRelativeFilePath(item, `${field}[${index}]`),
+  );
+  if (new Set(paths).size !== paths.length) {
+    throw new TypeError(`${field} must not contain duplicate paths`);
+  }
+  return paths;
 }
 
 function parseVerifier(
@@ -250,22 +315,38 @@ function parseVerifier(
   context: string,
 ): EvaluationTaskV1["verifier"] {
   const verifier = asRecord(value, context);
-  assertExactKeys(verifier, ["command", "args", "timeoutMs"], context);
+  assertExactKeys(
+    verifier,
+    ["command", "args", "timeoutMs", "immutablePaths"],
+    context,
+  );
   const command = nonEmptyString(verifier.command, `${context}.command`, 1_000);
   const commandName = basename(command).toLowerCase();
-  if (FORBIDDEN_BARE_PACKAGE_MANAGERS.has(commandName)) {
+  const args = parseStringArray(verifier.args, `${context}.args`, 100);
+  if (
+    (commandName !== "node" && commandName !== "node.exe") ||
+    args.length !== 2 ||
+    args[0] !== "--test" ||
+    !/\.(?:c|m)?js$|\.ts$/u.test(
+      safeRelativeFilePath(args[1], `${context}.args[1]`),
+    )
+  ) {
     throw new TypeError(
-      `${context}.command must use an age-gated Socket Firewall wrapper instead of bare ${commandName}`,
+      `${context} must use the fail-closed verifier form node --test <safe-relative-test-file>; package managers and interpreter indirection must use an age-gated Socket Firewall workflow outside evaluation`,
     );
   }
   return {
     command,
-    args: parseStringArray(verifier.args, `${context}.args`, 100),
+    args,
     timeoutMs: boundedInteger(
       verifier.timeoutMs,
       `${context}.timeoutMs`,
       100,
       3_600_000,
+    ),
+    immutablePaths: parseImmutablePaths(
+      verifier.immutablePaths,
+      `${context}.immutablePaths`,
     ),
   };
 }
@@ -311,7 +392,9 @@ export function parseEvaluationSuite(
       200,
     );
     if (modelIds.has(modelId)) {
-      throw new TypeError(`Evaluation suite contains duplicate model ${modelId}`);
+      throw new TypeError(
+        `Evaluation suite contains duplicate model ${modelId}`,
+      );
     }
     modelIds.add(modelId);
     let tier: "strong" | "weak";
@@ -396,7 +479,9 @@ export function parseEvaluationSuite(
         `Evaluation suite conditions[${index}]`,
       );
       if (seen.has(parsed)) {
-        throw new TypeError(`Evaluation suite contains duplicate condition ${parsed}`);
+        throw new TypeError(
+          `Evaluation suite contains duplicate condition ${parsed}`,
+        );
       }
       seen.add(parsed);
       return parsed;
@@ -438,9 +523,7 @@ export function parseEvaluationSuite(
 function suiteConditions(
   suite: EvaluationSuiteV1,
 ): EvaluationPolicyV1["condition"][] {
-  return suite.conditions
-    ? [...suite.conditions]
-    : [...EVALUATION_CONDITIONS];
+  return suite.conditions ? [...suite.conditions] : [...EVALUATION_CONDITIONS];
 }
 
 export function evaluationSpecHash(suite: EvaluationSuiteV1): string {
@@ -505,7 +588,9 @@ function median(values: readonly number[]): number {
     : sorted[midpoint];
 }
 
-function optionalMean(values: readonly (number | undefined)[]): number | undefined {
+function optionalMean(
+  values: readonly (number | undefined)[],
+): number | undefined {
   const observed = values.filter(
     (value): value is number => value !== undefined,
   );
@@ -521,6 +606,11 @@ function summarizeCondition(
     runs: runs.length,
     successes,
     successRate: runs.length === 0 ? 0 : successes / runs.length,
+    providerFailures: runs.filter((run) => run.failureClass === "provider")
+      .length,
+    harnessFailures: runs.filter((run) => run.failureClass === "harness")
+      .length,
+    taskFailures: runs.filter((run) => run.failureClass === "task").length,
     medianActions: median(runs.map((run) => run.actions)),
     medianModelRequests: median(runs.map((run) => run.modelRequests)),
     medianElapsedMs: median(runs.map((run) => run.elapsedMs)),
@@ -548,16 +638,27 @@ function summarizeCondition(
 export function summarizeEvaluationRuns(
   suite: EvaluationSuiteV1,
   runs: readonly EvaluationRunV1[],
+  identity: EvaluationExecutionIdentity,
   clock: () => number = Date.now,
 ): EvaluationReportV1 {
-  const specHash = evaluationSpecHash(suite);
+  const specHash = identity.specHash;
   const conditions = suiteConditions(suite);
   const expectedPlans = planEvaluationRuns(suite);
   const expectedIds = new Set(expectedPlans.map((plan) => plan.id));
   const observedIds = new Set<string>();
   for (const run of runs) {
-    if (run.suiteId !== suite.id || run.specHash !== specHash) {
-      throw new TypeError(`Evaluation run ${run.id} belongs to a different suite`);
+    if (
+      run.suiteId !== suite.id ||
+      run.specHash !== specHash ||
+      run.executionHash !== identity.executionHash ||
+      run.harnessHash !== identity.harnessHash ||
+      run.workspaceHash !== identity.workspaceHash ||
+      run.hardeningConfigHash !== identity.hardeningConfigHash ||
+      run.ompVersionHash !== identity.ompVersionHash
+    ) {
+      throw new TypeError(
+        `Evaluation run ${run.id} belongs to a different execution`,
+      );
     }
     if (!expectedIds.has(run.id)) {
       throw new TypeError(`Unexpected evaluation run ${run.id}`);
@@ -567,7 +668,10 @@ export function summarizeEvaluationRuns(
     }
     observedIds.add(run.id);
   }
-  const pairConditions = new Map<string, Set<EvaluationPolicyV1["condition"]>>();
+  const pairConditions = new Map<
+    string,
+    Set<EvaluationPolicyV1["condition"]>
+  >();
   const weakPairs = new Set<string>();
   for (const run of runs) {
     const pairKey = `${run.taskId}\u0000${run.model}\u0000${run.replicate}`;
@@ -587,13 +691,19 @@ export function summarizeEvaluationRuns(
   const summaries: EvaluationReportV1["summaries"] = {};
   for (const condition of conditions) {
     const matching = runs.filter((run) => run.condition === condition);
-    if (matching.length > 0) summaries[condition] = summarizeCondition(matching);
+    if (matching.length > 0)
+      summaries[condition] = summarizeCondition(matching);
   }
   return {
     version: 1,
     kind: "evaluation_report",
     suiteId: suite.id,
     specHash,
+    executionHash: identity.executionHash,
+    harnessHash: identity.harnessHash,
+    workspaceHash: identity.workspaceHash,
+    hardeningConfigHash: identity.hardeningConfigHash,
+    ompVersionHash: identity.ompVersionHash,
     generatedAt: isoNow(clock),
     conditions,
     runCount: runs.length,
@@ -609,8 +719,7 @@ function evaluationPolicy(
   taskId: string,
   condition: EvaluationPolicyV1["condition"],
 ): JsonObject {
-  const refinerEnabled =
-    CONDITION_ORDER[condition] >= CONDITION_ORDER.refiner;
+  const refinerEnabled = CONDITION_ORDER[condition] >= CONDITION_ORDER.refiner;
   return {
     version: 1,
     evaluation: { condition, taskId },
@@ -647,6 +756,40 @@ function appendCapture(
   chunks.push(chunk);
 }
 
+async function signalProcessTree(
+  child: ChildProcess,
+  force: boolean,
+): Promise<void> {
+  if (child.pid === undefined) return;
+  if (process.platform === "win32") {
+    const { promise, resolve: resolveKill } = Promise.withResolvers<void>();
+    const killer = spawn(
+      "taskkill.exe",
+      ["/PID", String(child.pid), "/T", ...(force ? ["/F"] : [])],
+      {
+        shell: false,
+        stdio: "ignore",
+        windowsHide: true,
+      },
+    );
+    killer.once("error", () => {
+      child.kill(force ? "SIGKILL" : "SIGTERM");
+      resolveKill();
+    });
+    killer.once("close", () => resolveKill());
+    killer.unref();
+    await promise;
+    return;
+  }
+  try {
+    process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
+  } catch (error) {
+    if (errorCode(error) !== "ESRCH") {
+      child.kill(force ? "SIGKILL" : "SIGTERM");
+    }
+  }
+}
+
 async function runProcess(
   executable: string,
   args: readonly string[],
@@ -656,13 +799,17 @@ async function runProcess(
     timeoutMs: number;
   },
 ): Promise<ProcessResult> {
-  const { promise, resolve: resolveProcess, reject: rejectProcess } =
-    Promise.withResolvers<ProcessResult>();
+  const {
+    promise,
+    resolve: resolveProcess,
+    reject: rejectProcess,
+  } = Promise.withResolvers<ProcessResult>();
   const child = spawn(executable, [...args], {
     cwd: options.cwd,
     env: options.env,
     shell: false,
     windowsHide: true,
+    detached: process.platform !== "win32",
   });
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
@@ -670,32 +817,24 @@ async function runProcess(
   const stderrState = { bytes: 0, exceeded: false };
   let timedOut = false;
   let settled = false;
+  let terminating = false;
+  let observedExitCode: number | null = null;
+  let observedSignal: NodeJS.Signals | null = null;
+  let teardown: NodeJS.Timeout | undefined;
+  let terminationComplete: Promise<void> | undefined;
   const timeout = setTimeout(() => {
     timedOut = true;
-    child.kill("SIGTERM");
+    terminate();
   }, options.timeoutMs);
-  const forceKill = setTimeout(() => {
-    if (!settled && timedOut) child.kill("SIGKILL");
-  }, options.timeoutMs + 2_000);
-  child.stdout.on("data", (chunk: Buffer) => {
-    appendCapture(stdoutChunks, chunk, stdoutState);
-    if (stdoutState.exceeded) child.kill("SIGTERM");
-  });
-  child.stderr.on("data", (chunk: Buffer) => {
-    appendCapture(stderrChunks, chunk, stderrState);
-    if (stderrState.exceeded) child.kill("SIGTERM");
-  });
-  child.once("error", (error) => {
-    settled = true;
-    clearTimeout(timeout);
-    clearTimeout(forceKill);
-    rejectProcess(error);
-  });
-  child.once("close", (exitCode, signal) => {
+
+  const finish = (
+    exitCode: number | null = observedExitCode,
+    signal: NodeJS.Signals | null = observedSignal,
+  ): void => {
     if (settled) return;
     settled = true;
     clearTimeout(timeout);
-    clearTimeout(forceKill);
+    clearTimeout(teardown);
     const result: ProcessResult = {
       stdout: Buffer.concat(stdoutChunks).toString("utf8"),
       stderr: Buffer.concat(stderrChunks).toString("utf8"),
@@ -705,6 +844,45 @@ async function runProcess(
     if (exitCode !== null) result.exitCode = exitCode;
     if (signal !== null) result.signal = signal;
     resolveProcess(result);
+  };
+
+  const terminate = (): void => {
+    if (terminating || settled) return;
+    terminating = true;
+    terminationComplete = signalProcessTree(child, true);
+    teardown = setTimeout(() => {
+      if (settled) return;
+      child.stdout.destroy();
+      child.stderr.destroy();
+      finish();
+    }, PROCESS_TEARDOWN_LIMIT_MS);
+  };
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    appendCapture(stdoutChunks, chunk, stdoutState);
+    if (stdoutState.exceeded) terminate();
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    appendCapture(stderrChunks, chunk, stderrState);
+    if (stderrState.exceeded) terminate();
+  });
+  child.once("error", (error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    clearTimeout(teardown);
+    rejectProcess(error);
+  });
+  child.once("exit", (exitCode, signal) => {
+    observedExitCode = exitCode;
+    observedSignal = signal;
+  });
+  child.once("close", (exitCode, signal) => {
+    if (terminationComplete) {
+      void terminationComplete.then(() => finish(exitCode, signal));
+    } else {
+      finish(exitCode, signal);
+    }
   });
   return promise;
 }
@@ -725,6 +903,7 @@ export function parseOmpOutputMetrics(stdout: string): OmpOutputMetrics {
   let observedOutput = false;
   let observedCost = false;
   let malformedLines = 0;
+  let modelErrors = 0;
   for (const line of stdout.split("\n")) {
     if (!line.trim().startsWith("{")) continue;
     let parsed: unknown;
@@ -750,10 +929,14 @@ export function parseOmpOutputMetrics(stdout: string): OmpOutputMetrics {
       typeof message !== "object" ||
       Array.isArray(message) ||
       !("role" in message) ||
-      !("responseId" in message) ||
-      message.role !== "assistant" ||
-      typeof message.responseId !== "string"
+      message.role !== "assistant"
     ) {
+      continue;
+    }
+    if ("stopReason" in message && message.stopReason === "error") {
+      modelErrors++;
+    }
+    if (!("responseId" in message) || typeof message.responseId !== "string") {
       continue;
     }
     if (responseIds.has(message.responseId)) continue;
@@ -788,6 +971,7 @@ export function parseOmpOutputMetrics(stdout: string): OmpOutputMetrics {
   const metrics: OmpOutputMetrics = {
     actions,
     modelRequests: responseIds.size,
+    modelErrors,
     malformedLines,
   };
   if (observedInput) metrics.inputTokens = inputTokens;
@@ -815,6 +999,8 @@ async function directoryBytes(path: string): Promise<number> {
 async function readManifestEvidence(
   stateHome: string,
   dataHome: string,
+  workspace: string,
+  extensionPath: string,
 ): Promise<ManifestEvidence> {
   const runsRoot = join(stateHome, "omp-supercharged", "runs");
   let runDirectories: string[] = [];
@@ -835,13 +1021,37 @@ async function readManifestEvidence(
   if (runDirectories.length !== 1) return evidence;
   const runDirectory = runDirectories[0];
   try {
+    const eventsPath = join(runDirectory, "events.jsonl");
+    const eventsBytes = await readFile(eventsPath);
+    const recovery = await recoverLedger(eventsPath);
+    if (recovery.truncatedTail !== undefined || recovery.events.length === 0) {
+      return evidence;
+    }
+    const loadedPolicy = await loadProjectPolicy(workspace);
+    if (loadedPolicy.error) return evidence;
+    const packageValue = asRecord(
+      JSON.parse(await readFile(join(extensionPath, "package.json"), "utf8")),
+      "Evaluation harness package",
+    );
+    const expected = deriveManifest(
+      recovery.events,
+      sha256Bytes(eventsBytes),
+      loadedPolicy.policy,
+      {
+        extensionVersion: nonEmptyString(
+          packageValue.version,
+          "Evaluation harness package version",
+          100,
+        ),
+      },
+    );
     const manifestValue: unknown = JSON.parse(
       await readFile(join(runDirectory, "manifest.json"), "utf8"),
     );
-    const recovery = await recoverLedger(join(runDirectory, "events.jsonl"));
-    if (recovery.truncatedTail !== undefined) return evidence;
-    validateManifest(manifestValue, recovery.events);
-    evidence.manifest = manifestValue;
+    if (canonicalJson(manifestValue) !== canonicalJson(expected)) {
+      return evidence;
+    }
+    evidence.manifest = expected;
     evidence.reconstructionSucceeded = true;
     evidence.waivers = recovery.events.filter(
       (event) => event.kind === "verification_waived",
@@ -875,7 +1085,9 @@ async function collectFingerprintEntries(
 ): Promise<void> {
   const info = await lstat(absolutePath);
   if (info.isSymbolicLink()) {
-    throw new TypeError(`${context} may not contain symbolic links: ${absolutePath}`);
+    throw new TypeError(
+      `${context} may not contain symbolic links: ${absolutePath}`,
+    );
   }
   if (info.isFile()) {
     entries.push({
@@ -887,7 +1099,9 @@ async function collectFingerprintEntries(
     return;
   }
   if (!info.isDirectory()) {
-    throw new TypeError(`${context} may contain only files and directories: ${absolutePath}`);
+    throw new TypeError(
+      `${context} may contain only files and directories: ${absolutePath}`,
+    );
   }
   entries.push({ path: logicalPath, type: "directory" });
   const children = await readdir(absolutePath, { withFileTypes: true });
@@ -917,7 +1131,7 @@ async function fingerprintTree(
 async function fingerprintHarness(extensionPath: string): Promise<string> {
   const entries: FingerprintEntry[] = [];
   const excluded = new Set<string>();
-  for (const relativePath of ["package.json", "src"]) {
+  for (const relativePath of RUNTIME_ARTIFACT_PATHS) {
     await collectFingerprintEntries(
       join(extensionPath, relativePath),
       relativePath,
@@ -929,7 +1143,40 @@ async function fingerprintHarness(extensionPath: string): Promise<string> {
   return hashJson({ entries });
 }
 
-async function copyWorkspaceTree(sourceRoot: string, destination: string): Promise<string> {
+async function fingerprintImmutableFiles(
+  root: string,
+  paths: readonly string[],
+): Promise<string> {
+  const entries: { path: string; hash: string }[] = [];
+  for (const relativePath of paths) {
+    const absolutePath = join(root, relativePath);
+    let info;
+    try {
+      info = await lstat(absolutePath);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") {
+        throw new Error(`Immutable verifier path is missing: ${relativePath}`);
+      }
+      throw error;
+    }
+    if (info.isSymbolicLink()) {
+      throw new Error(`Immutable verifier path is a symlink: ${relativePath}`);
+    }
+    if (!info.isFile()) {
+      throw new Error(`Immutable verifier path is not a file: ${relativePath}`);
+    }
+    entries.push({
+      path: relativePath,
+      hash: sha256Bytes(await readFile(absolutePath)),
+    });
+  }
+  return hashJson({ entries });
+}
+
+async function copyWorkspaceTree(
+  sourceRoot: string,
+  destination: string,
+): Promise<string> {
   const before = await fingerprintTree(
     sourceRoot,
     EXCLUDED_WORKSPACE_NAMES,
@@ -940,8 +1187,7 @@ async function copyWorkspaceTree(sourceRoot: string, destination: string): Promi
     force: false,
     errorOnExist: true,
     filter: (source) =>
-      source === sourceRoot ||
-      !EXCLUDED_WORKSPACE_NAMES.has(basename(source)),
+      source === sourceRoot || !EXCLUDED_WORKSPACE_NAMES.has(basename(source)),
   });
   const after = await fingerprintTree(
     destination,
@@ -950,7 +1196,9 @@ async function copyWorkspaceTree(sourceRoot: string, destination: string): Promi
   );
   if (before !== after) {
     await rm(destination, { recursive: true, force: true });
-    throw new Error(`Evaluation workspace changed while being copied: ${sourceRoot}`);
+    throw new Error(
+      `Evaluation workspace changed while being copied: ${sourceRoot}`,
+    );
   }
   return before;
 }
@@ -965,7 +1213,10 @@ async function snapshotEvaluationSuite(
     for (let index = 0; index < suite.tasks.length; index++) {
       const task = suite.tasks[index];
       const destination = join(root, `task-${index + 1}`);
-      const hash = await copyWorkspaceTree(resolve(task.workspace), destination);
+      const hash = await copyWorkspaceTree(
+        resolve(task.workspace),
+        destination,
+      );
       tasks.push({ ...task, workspace: destination });
       taskHashes.push({ taskId: task.id, hash });
     }
@@ -980,17 +1231,54 @@ async function snapshotEvaluationSuite(
   }
 }
 
+async function snapshotEvaluationHarness(
+  options: EvaluationRunnerOptions,
+): Promise<EvaluationHarnessSnapshot> {
+  const sourceRoot = resolve(options.extensionPath ?? PACKAGE_ROOT);
+  const sourceHardeningPath = resolve(
+    options.hardeningConfigPath ?? join(sourceRoot, "config", "hardened.yml"),
+  );
+  const root = await mkdtemp(join(tmpdir(), "omp-supercharged-harness-"));
+  try {
+    const harnessHash = await fingerprintHarness(sourceRoot);
+    const hardeningConfigHash = sha256Bytes(
+      await readFile(sourceHardeningPath),
+    );
+    for (const relativePath of RUNTIME_ARTIFACT_PATHS) {
+      await cp(join(sourceRoot, relativePath), join(root, relativePath), {
+        recursive: true,
+        force: false,
+        errorOnExist: true,
+      });
+    }
+    const configRoot = join(root, "config");
+    await ensurePrivateDirectory(configRoot);
+    await cp(sourceHardeningPath, join(configRoot, "hardened.yml"), {
+      force: false,
+      errorOnExist: true,
+    });
+    if (
+      (await fingerprintHarness(root)) !== harnessHash ||
+      sha256Bytes(await readFile(join(configRoot, "hardened.yml"))) !==
+        hardeningConfigHash
+    ) {
+      throw new Error("Evaluation harness changed while being copied");
+    }
+    return { root, harnessHash, hardeningConfigHash };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 async function buildExecutionIdentity(
   suite: EvaluationSuiteV1,
-  snapshot: EvaluationSuiteSnapshot,
+  suiteSnapshot: EvaluationSuiteSnapshot,
+  harnessSnapshot: EvaluationHarnessSnapshot,
   options: EvaluationRunnerOptions,
 ): Promise<EvaluationExecutionIdentity> {
-  const extensionPath = resolve(options.extensionPath ?? PACKAGE_ROOT);
-  const hardeningConfigPath = resolve(
-    options.hardeningConfigPath ?? join(extensionPath, "config", "hardened.yml"),
-  );
-  const harnessHash = await fingerprintHarness(extensionPath);
-  const hardeningConfigHash = sha256Bytes(await readFile(hardeningConfigPath));
+  const harnessHash = harnessSnapshot.harnessHash;
+  const hardeningConfigHash = harnessSnapshot.hardeningConfigHash;
   const ompExecutable = options.ompExecutable ?? "omp";
   const versionResult = await runProcess(ompExecutable, ["--version"], {
     cwd: process.cwd(),
@@ -1003,13 +1291,15 @@ async function buildExecutionIdentity(
     versionResult.captureExceeded ||
     version.length === 0
   ) {
-    throw new Error(`Unable to fingerprint evaluation executable ${ompExecutable}`);
+    throw new Error(
+      `Unable to fingerprint evaluation executable ${ompExecutable}`,
+    );
   }
   const specHash = evaluationSpecHash(suite);
   const identityWithoutExecution = {
     specHash,
     harnessHash,
-    workspaceHash: snapshot.workspaceHash,
+    workspaceHash: suiteSnapshot.workspaceHash,
     hardeningConfigHash,
     ompVersionHash: hashJson({
       executable: ompExecutable,
@@ -1029,18 +1319,23 @@ async function prepareWorkspace(
 ): Promise<{ root: string; cwd: string }> {
   const sourceRoot = resolve(plan.task.workspace);
   const root = await mkdtemp(join(tmpdir(), "omp-supercharged-evaluation-"));
-  const cwd = join(root, "workspace");
-  await copyWorkspaceTree(sourceRoot, cwd);
-  if (plan.condition !== "stock") {
-    const policyDirectory = join(cwd, ".omp");
-    await ensurePrivateDirectory(policyDirectory);
-    await writeFile(
-      join(policyDirectory, "supercharged.json"),
-      `${canonicalJson(evaluationPolicy(suite, plan.task.id, plan.condition))}\n`,
-      { encoding: "utf8", mode: 0o600 },
-    );
+  try {
+    const cwd = join(root, "workspace");
+    await copyWorkspaceTree(sourceRoot, cwd);
+    if (plan.condition !== "stock") {
+      const policyDirectory = join(cwd, ".omp");
+      await ensurePrivateDirectory(policyDirectory);
+      await writeFile(
+        join(policyDirectory, "supercharged.json"),
+        `${canonicalJson(evaluationPolicy(suite, plan.task.id, plan.condition))}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+    }
+    return { root, cwd };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
   }
-  return { root, cwd };
 }
 
 function baseRun(
@@ -1084,6 +1379,7 @@ async function executeEvaluationRun(
   const started = clock();
   const startedAt = new Date(started).toISOString();
   let workspaceRoot: string | undefined;
+  let isolatedConfigRoot: string | undefined;
   try {
     const workspace = await prepareWorkspace(plan, suite);
     workspaceRoot = workspace.root;
@@ -1091,9 +1387,16 @@ async function executeEvaluationRun(
     const dataHome = join(runRoot, "xdg-data");
     await ensurePrivateDirectory(stateHome);
     await ensurePrivateDirectory(dataHome);
+    isolatedConfigRoot = join(runRoot, "omp-config");
+    await ensurePrivateDirectory(isolatedConfigRoot);
     const extensionPath = resolve(options.extensionPath ?? PACKAGE_ROOT);
     const hardeningConfigPath = resolve(
-      options.hardeningConfigPath ?? join(extensionPath, "config", "hardened.yml"),
+      options.hardeningConfigPath ??
+        join(extensionPath, "config", "hardened.yml"),
+    );
+    const immutableFingerprint = await fingerprintImmutableFiles(
+      workspace.cwd,
+      plan.task.verifier.immutablePaths,
     );
     const maxRunSeconds = plan.task.maxRunSeconds ?? 1_200;
     const args = [
@@ -1120,9 +1423,18 @@ async function executeEvaluationRun(
         ...process.env,
         XDG_STATE_HOME: stateHome,
         XDG_DATA_HOME: dataHome,
+        PI_CONFIG_DIR: isolatedConfigRoot,
+        PI_CODING_AGENT_DIR: activeOmpAgentDirectory(),
       },
       timeoutMs: (maxRunSeconds + 30) * 1_000,
     });
+    const immutableFingerprintAfter = await fingerprintImmutableFiles(
+      workspace.cwd,
+      plan.task.verifier.immutablePaths,
+    );
+    if (immutableFingerprintAfter !== immutableFingerprint) {
+      throw new Error("Immutable verifier contract changed during evaluation");
+    }
     const outputMetrics = parseOmpOutputMetrics(ompResult.stdout);
     const verifierResult = await runProcess(
       plan.task.verifier.command,
@@ -1135,20 +1447,45 @@ async function executeEvaluationRun(
     const manifestEvidence =
       plan.condition === "stock"
         ? undefined
-        : await readManifestEvidence(stateHome, dataHome);
+        : await readManifestEvidence(
+            stateHome,
+            dataHome,
+            workspace.cwd,
+            extensionPath,
+          );
     const verifierSucceeded =
       verifierResult.exitCode === 0 &&
       !verifierResult.timedOut &&
       !verifierResult.captureExceeded;
+    const processSucceeded =
+      ompResult.exitCode === 0 &&
+      !ompResult.timedOut &&
+      !ompResult.captureExceeded &&
+      outputMetrics.malformedLines === 0 &&
+      outputMetrics.modelRequests > 0 &&
+      outputMetrics.modelErrors === 0;
+    const reconstructionSucceeded =
+      manifestEvidence === undefined ||
+      manifestEvidence.reconstructionSucceeded;
+    const runSucceeded =
+      processSucceeded && verifierSucceeded && reconstructionSucceeded;
     const manifest = manifestEvidence?.manifest;
     const result: EvaluationRunV1 = {
       ...baseRun(suite, plan, identity, startedAt),
-      success: verifierSucceeded,
+      success: runSucceeded,
       actions: manifest?.metrics.actions ?? outputMetrics.actions,
       modelRequests:
         outputMetrics.modelRequests + (manifest?.metrics.modelRequests ?? 0),
       elapsedMs: Math.max(0, clock() - started),
     };
+    if (!runSucceeded) {
+      result.failureClass =
+        outputMetrics.modelErrors > 0
+          ? "provider"
+          : !processSucceeded || !reconstructionSucceeded
+            ? "harness"
+            : "task";
+    }
     if (outputMetrics.inputTokens !== undefined) {
       result.primaryInputTokens = outputMetrics.inputTokens;
     }
@@ -1158,33 +1495,28 @@ async function executeEvaluationRun(
     if (outputMetrics.costUsd !== undefined) {
       result.primaryCostUsd = outputMetrics.costUsd;
     }
-    if (ompResult.exitCode !== undefined) result.processExitCode = ompResult.exitCode;
+    if (ompResult.exitCode !== undefined)
+      result.processExitCode = ompResult.exitCode;
     if (verifierResult.exitCode !== undefined) {
       result.verifierExitCode = verifierResult.exitCode;
     }
     if (manifestEvidence !== undefined) {
       result.reconstructionSucceeded = manifestEvidence.reconstructionSucceeded;
       result.storageBytes = manifestEvidence.storageBytes;
-      result.waivers = manifestEvidence.waivers;
-      result.verificationDefectsCaught = manifest?.metrics.verificationFailures ?? 0;
-      result.regressionsAfterRefinement = manifest?.metrics.regressions ?? 0;
-      const staleSuccessfulRun =
-        verifierSucceeded &&
-        manifest !== undefined &&
-        manifest.verificationStatus === "stale";
-      result.falseGateInterventions = staleSuccessfulRun
-        ? Math.max(1, manifestEvidence.continuationDecisions)
-        : 0;
+      if (manifest !== undefined) {
+        result.waivers = manifestEvidence.waivers;
+        result.verificationDefectsCaught =
+          manifest.metrics.verificationFailures;
+        result.regressionsAfterRefinement =
+          manifest.metrics.rolledBackRevisions;
+        const staleSuccessfulRun =
+          runSucceeded && manifest.verificationStatus === "stale";
+        result.falseGateInterventions = staleSuccessfulRun
+          ? Math.max(1, manifestEvidence.continuationDecisions)
+          : 0;
+      }
     }
-    if (
-      ompResult.exitCode !== 0 ||
-      ompResult.timedOut ||
-      ompResult.captureExceeded ||
-      outputMetrics.malformedLines > 0 ||
-      !verifierSucceeded ||
-      (manifestEvidence !== undefined &&
-        !manifestEvidence.reconstructionSucceeded)
-    ) {
+    if (!runSucceeded) {
       result.errorHash = hashJson({
         processExitCode: ompResult.exitCode ?? "unknown",
         processSignal: ompResult.signal ?? "none",
@@ -1192,6 +1524,8 @@ async function executeEvaluationRun(
         processCaptureExceeded: ompResult.captureExceeded,
         processStderrHash: hashJson({ stderr: ompResult.stderr }),
         malformedOutputLines: outputMetrics.malformedLines,
+        modelErrors: outputMetrics.modelErrors,
+        failureClass: result.failureClass,
         verifierExitCode: verifierResult.exitCode ?? "unknown",
         verifierSignal: verifierResult.signal ?? "none",
         verifierTimedOut: verifierResult.timedOut,
@@ -1206,6 +1540,7 @@ async function executeEvaluationRun(
     return {
       ...baseRun(suite, plan, identity, startedAt),
       success: false,
+      failureClass: "harness",
       actions: 0,
       modelRequests: 0,
       elapsedMs: Math.max(0, clock() - started),
@@ -1220,6 +1555,9 @@ async function executeEvaluationRun(
     if (workspaceRoot && !options.keepWorkspaces) {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
+    if (isolatedConfigRoot) {
+      await rm(isolatedConfigRoot, { recursive: true, force: true });
+    }
   }
 }
 
@@ -1227,6 +1565,7 @@ function validateStoredRun(
   value: unknown,
   suite: EvaluationSuiteV1,
   plan: EvaluationRunPlan,
+  identity: EvaluationExecutionIdentity,
 ): EvaluationRunV1 {
   const context = `Stored evaluation run ${plan.id}`;
   const run = asRecord(value, context);
@@ -1236,6 +1575,11 @@ function validateStoredRun(
     "id",
     "suiteId",
     "specHash",
+    "executionHash",
+    "harnessHash",
+    "workspaceHash",
+    "hardeningConfigHash",
+    "ompVersionHash",
     "taskId",
     "replicate",
     "condition",
@@ -1244,6 +1588,7 @@ function validateStoredRun(
     "promptHash",
     "startedAt",
     "success",
+    "failureClass",
     "actions",
     "modelRequests",
     "elapsedMs",
@@ -1266,7 +1611,12 @@ function validateStoredRun(
     run.kind !== "evaluation_run" ||
     run.id !== plan.id ||
     run.suiteId !== suite.id ||
-    run.specHash !== evaluationSpecHash(suite)
+    run.specHash !== identity.specHash ||
+    run.executionHash !== identity.executionHash ||
+    run.harnessHash !== identity.harnessHash ||
+    run.workspaceHash !== identity.workspaceHash ||
+    run.hardeningConfigHash !== identity.hardeningConfigHash ||
+    run.ompVersionHash !== identity.ompVersionHash
   ) {
     throw new TypeError(`${context} is incompatible`);
   }
@@ -1293,6 +1643,17 @@ function validateStoredRun(
     id: plan.id,
     suiteId: suite.id,
     specHash: contentHash(run.specHash, `${context}.specHash`),
+    executionHash: contentHash(run.executionHash, `${context}.executionHash`),
+    harnessHash: contentHash(run.harnessHash, `${context}.harnessHash`),
+    workspaceHash: contentHash(run.workspaceHash, `${context}.workspaceHash`),
+    hardeningConfigHash: contentHash(
+      run.hardeningConfigHash,
+      `${context}.hardeningConfigHash`,
+    ),
+    ompVersionHash: contentHash(
+      run.ompVersionHash,
+      `${context}.ompVersionHash`,
+    ),
     taskId,
     replicate: boundedInteger(
       run.replicate,
@@ -1320,6 +1681,20 @@ function validateStoredRun(
     ),
     elapsedMs: finiteNonNegative(run.elapsedMs, `${context}.elapsedMs`),
   };
+  if (run.failureClass !== undefined) {
+    if (
+      typeof run.failureClass !== "string" ||
+      !EVALUATION_FAILURE_CLASSES.has(
+        run.failureClass as EvaluationFailureClass,
+      )
+    ) {
+      throw new TypeError(`${context}.failureClass is invalid`);
+    }
+    parsed.failureClass = run.failureClass as EvaluationFailureClass;
+  }
+  if (parsed.success === (parsed.failureClass !== undefined)) {
+    throw new TypeError(`${context} success and failureClass are inconsistent`);
+  }
   if (run.verificationDefectsCaught !== undefined) {
     parsed.verificationDefectsCaught = boundedInteger(
       run.verificationDefectsCaught,
@@ -1403,6 +1778,9 @@ function validateStoredRun(
   if (run.errorHash !== undefined) {
     parsed.errorHash = contentHash(run.errorHash, `${context}.errorHash`);
   }
+  if (parsed.success === (parsed.errorHash !== undefined)) {
+    throw new TypeError(`${context} success and errorHash are inconsistent`);
+  }
   return parsed;
 }
 
@@ -1410,10 +1788,11 @@ async function readStoredRun(
   path: string,
   suite: EvaluationSuiteV1,
   plan: EvaluationRunPlan,
+  identity: EvaluationExecutionIdentity,
 ): Promise<EvaluationRunV1 | undefined> {
   try {
     const value: unknown = JSON.parse(await readFile(path, "utf8"));
-    return validateStoredRun(value, suite, plan);
+    return validateStoredRun(value, suite, plan, identity);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return undefined;
     throw error;
@@ -1425,43 +1804,71 @@ export async function runEvaluationSuite(
   options: EvaluationRunnerOptions = {},
 ): Promise<EvaluationSuiteResult> {
   const parsedSuite = parseEvaluationSuite(suite);
-  const specHash = evaluationSpecHash(parsedSuite);
-  const defaultRoot = join(
-    resolveHarnessPaths().stateRoot,
-    "evaluations",
-    parsedSuite.id,
-    specHash.slice(7, 23),
-  );
-  const outputRoot = resolve(options.outputRoot ?? defaultRoot);
-  const runsRoot = join(outputRoot, "runs");
-  await ensurePrivateDirectory(runsRoot);
-  const runs: EvaluationRunV1[] = [];
-  for (const plan of planEvaluationRuns(parsedSuite)) {
-    const resultPath = join(runsRoot, `${plan.id}.json`);
-    const existing = await readStoredRun(resultPath, parsedSuite, plan);
-    if (existing) {
-      runs.push(existing);
-      continue;
-    }
-    const runRoot = join(outputRoot, "runtime", plan.id);
-    await ensurePrivateDirectory(runRoot);
-    const result = await executeEvaluationRun(
+  const suiteSnapshot = await snapshotEvaluationSuite(parsedSuite);
+  let harnessSnapshot: EvaluationHarnessSnapshot | undefined;
+  try {
+    harnessSnapshot = await snapshotEvaluationHarness(options);
+    const identity = await buildExecutionIdentity(
       parsedSuite,
-      plan,
-      runRoot,
+      suiteSnapshot,
+      harnessSnapshot,
       options,
     );
-    await writePrivateAtomic(resultPath, `${canonicalJson(result)}\n`);
-    runs.push(result);
+    const runtimeOptions: EvaluationRunnerOptions = {
+      ...options,
+      extensionPath: harnessSnapshot.root,
+      hardeningConfigPath: join(harnessSnapshot.root, "config", "hardened.yml"),
+    };
+    const defaultRoot = join(
+      resolveHarnessPaths().stateRoot,
+      "evaluations",
+      parsedSuite.id,
+      identity.executionHash.slice(7, 23),
+    );
+    const outputRoot = resolve(options.outputRoot ?? defaultRoot);
+    const runsRoot = join(outputRoot, "runs");
+    await ensurePrivateDirectory(runsRoot);
+    const runs: EvaluationRunV1[] = [];
+    for (const plan of planEvaluationRuns(suiteSnapshot.suite)) {
+      const resultPath = join(runsRoot, `${plan.id}.json`);
+      const existing = await readStoredRun(
+        resultPath,
+        parsedSuite,
+        plan,
+        identity,
+      );
+      if (existing) {
+        runs.push(existing);
+        continue;
+      }
+      const runRoot = join(outputRoot, "runtime", plan.id);
+      await rm(runRoot, { recursive: true, force: true });
+      await ensurePrivateDirectory(runRoot);
+      const result = await executeEvaluationRun(
+        suiteSnapshot.suite,
+        plan,
+        identity,
+        runRoot,
+        runtimeOptions,
+      );
+      await writePrivateAtomic(resultPath, `${canonicalJson(result)}\n`);
+      runs.push(result);
+    }
+    const report = summarizeEvaluationRuns(
+      parsedSuite,
+      runs,
+      identity,
+      options.clock ?? Date.now,
+    );
+    const reportPath = join(outputRoot, "report.json");
+    await writePrivateAtomic(reportPath, `${canonicalJson(report)}\n`);
+    return { report, runs, outputRoot, reportPath };
+  } finally {
+    if (harnessSnapshot) {
+      await rm(harnessSnapshot.root, { recursive: true, force: true });
+    }
+    await rm(suiteSnapshot.root, { recursive: true, force: true });
   }
-  const report = summarizeEvaluationRuns(
-    parsedSuite,
-    runs,
-    options.clock ?? Date.now,
-  );
-  const reportPath = join(outputRoot, "report.json");
-  await writePrivateAtomic(reportPath, `${canonicalJson(report)}\n`);
-  return { report, runs, outputRoot, reportPath };
 }
 
 export async function loadEvaluationSuite(

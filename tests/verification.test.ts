@@ -147,6 +147,120 @@ test("classification is conservative across shell, LSP, devices, and subagents",
     "ignored",
   );
 });
+test("prototype-named tools and LSP actions remain unknown", () => {
+  const policy = structuredClone(DEFAULT_PROJECT_POLICY);
+  assert.equal(
+    classifyToolCall({ toolName: "read", input: {} }, policy).classification,
+    "read",
+  );
+  assert.equal(
+    classifyToolCall(
+      { toolName: "lsp", input: { action: "diagnostics" } },
+      policy,
+    ).classification,
+    "read",
+  );
+  for (const name of ["constructor", "toString", "__proto__"]) {
+    const tool = classifyToolCall({ toolName: name, input: {} }, policy);
+    assert.equal(tool.classification, "unknown");
+    assert.equal(tool.classifier, "builtin:unknown-tool");
+
+    const action = classifyToolCall(
+      { toolName: "lsp", input: { action: name } },
+      policy,
+    );
+    assert.equal(action.classification, "unknown");
+    assert.equal(action.classifier, "builtin:unknown-lsp-action");
+  }
+});
+
+test("compound shell commands cannot hide mutations behind verification", () => {
+  const policy = structuredClone(DEFAULT_PROJECT_POLICY);
+
+  assert.equal(
+    classifyShellCommand("node --test test.mjs", policy).classification,
+    "verification",
+  );
+  assert.equal(
+    classifyShellCommand("git status --short", policy).classification,
+    "read",
+  );
+  assert.equal(
+    classifyShellCommand("prettier --write src/a.ts", policy).classification,
+    "mutation",
+  );
+  assert.equal(
+    classifyShellCommand(
+      "node --test test.mjs && prettier --write src/a.ts",
+      policy,
+    ).classification,
+    "mutation",
+  );
+  assert.equal(
+    classifyShellCommand("node --test; echo x > file", policy).classification,
+    "mutation",
+  );
+  assert.equal(
+    classifyShellCommand(
+      "node --test first.mjs && node --test second.mjs",
+      policy,
+    ).classification,
+    "verification",
+  );
+  assert.equal(
+    classifyShellCommand(
+      "node --test first.mjs; node --test second.mjs",
+      policy,
+    ).classification,
+    "verification",
+  );
+  assert.equal(
+    classifyShellCommand(
+      "node --test first.mjs | node --test second.mjs",
+      policy,
+    ).classification,
+    "verification",
+  );
+  assert.equal(
+    classifyShellCommand("node --test first.mjs | tee results.txt", policy)
+      .classification,
+    "mutation",
+  );
+  assert.equal(
+    classifyShellCommand("node --test test.mjs > results.txt", policy)
+      .classification,
+    "mutation",
+  );
+  assert.equal(
+    classifyShellCommand("node --test test.mjs &", policy).classification,
+    "mutation",
+  );
+  assert.equal(
+    classifyShellCommand("node --test $(echo test.mjs)", policy).classification,
+    "mutation",
+  );
+  assert.equal(
+    classifyShellCommand("node --test `echo test.mjs`", policy).classification,
+    "mutation",
+  );
+  assert.equal(
+    classifyShellCommand('node --test "test|name.mjs"', policy).classification,
+    "verification",
+  );
+
+  policy.verification.commandPatterns = ["^custom(?:\\s|$)"];
+  policy.verification.mutationCommandPatterns = ["^custom(?:\\s|$)"];
+  assert.equal(
+    classifyShellCommand("custom action", policy).classification,
+    "mutation",
+  );
+
+  policy.verification.ignoreCommandPatterns = ["^custom(?:\\s|$)"];
+  assert.equal(
+    classifyShellCommand("custom action", policy).classification,
+    "ignored",
+  );
+});
 
 test("policy parsing rejects partial malformed configuration atomically", () => {
   const parsed = parseProjectPolicy({
@@ -186,6 +300,16 @@ test("policy parsing rejects partial malformed configuration atomically", () => 
       }),
     /invalid/u,
   );
+  for (const key of ["constructor", "toString", "__proto__"]) {
+    const value = JSON.parse(
+      `{"version":1,${JSON.stringify(key)}:true}`,
+    ) as Record<string, unknown>;
+    assert.equal(Object.hasOwn(value, key), true);
+    assert.throws(
+      () => parseProjectPolicy(value),
+      new RegExp(`unknown field ${key}`, "u"),
+    );
+  }
 });
 
 test("freshness transitions, bounded stop decisions, and epoch-scoped waivers remain reconstructible", () => {

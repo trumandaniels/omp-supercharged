@@ -32,6 +32,19 @@ test("canonical JSON is stable and rejects values outside the JSON contract", ()
     '{"a":{"x":null,"y":true},"z":1}',
   );
   assert.equal(hashJson({ b: 2, a: 1 }), hashJson({ a: 1, b: 2 }));
+  const prototypeKeys = JSON.parse(
+    '{"__proto__":{"safe":true},"constructor":1,"toString":2}',
+  );
+  assert.equal(
+    canonicalJson(prototypeKeys),
+    '{"__proto__":{"safe":true},"constructor":1,"toString":2}',
+  );
+  assert.notEqual(
+    hashJson(prototypeKeys),
+    hashJson(
+      JSON.parse('{"__proto__":{"safe":false},"constructor":1,"toString":2}'),
+    ),
+  );
   assert.throws(
     () => canonicalJson({ value: undefined } as never),
     /undefined/u,
@@ -60,6 +73,17 @@ test("event validation requires complete, internally consistent contracts", () =
     () => validateRunEvent(missingHash),
     /requires systemPromptHash/u,
   );
+  const inheritedHash = structuredClone(valid) as unknown as {
+    data: Record<string, unknown>;
+  };
+  const systemPromptHash = inheritedHash.data.systemPromptHash;
+  delete inheritedHash.data.systemPromptHash;
+  Object.setPrototypeOf(inheritedHash.data, { systemPromptHash });
+  assert.equal(inheritedHash.data.systemPromptHash, systemPromptHash);
+  assert.throws(
+    () => validateRunEvent(inheritedHash),
+    /requires systemPromptHash/u,
+  );
   const wrongStatus = { ...valid, status: "ok" };
   assert.throws(() => validateRunEvent(wrongStatus), /invalid status/u);
   const extraField = structuredClone(valid) as unknown as {
@@ -67,6 +91,45 @@ test("event validation requires complete, internally consistent contracts", () =
   };
   extraField.data.rawPrompt = "secret";
   assert.throws(() => validateRunEvent(extraField), /unknown field rawPrompt/u);
+  for (const key of ["constructor", "toString", "__proto__"]) {
+    const field = JSON.parse(`{${JSON.stringify(key)}:true}`);
+    const unknownEnvelope = {
+      ...structuredClone(valid),
+      ...field,
+    } as unknown as RunEventV1;
+    assert.equal(Object.hasOwn(unknownEnvelope, key), true);
+    assert.throws(
+      () => validateRunEvent(unknownEnvelope),
+      new RegExp(`unknown field ${key}`, "u"),
+    );
+
+    const unknownData = {
+      ...structuredClone(valid),
+      data: { ...structuredClone(valid.data), ...field },
+    } as unknown as RunEventV1;
+    assert.equal(Object.hasOwn(unknownData.data, key), true);
+    assert.throws(
+      () => validateRunEvent(unknownData),
+      new RegExp(`unknown field ${key}`, "u"),
+    );
+
+    const prototypeStatus = {
+      ...valid,
+      status: key,
+    } as unknown as RunEventV1;
+    assert.throws(
+      () => validateRunEvent(prototypeStatus),
+      /Unknown run event status/u,
+    );
+    const prototypeKind = {
+      ...valid,
+      kind: key,
+    } as unknown as RunEventV1;
+    assert.throws(
+      () => validateRunEvent(prototypeKind),
+      /Unknown run event kind/u,
+    );
+  }
   const lineage: RunEventV1 = {
     version: 1,
     eventId: "event-2",

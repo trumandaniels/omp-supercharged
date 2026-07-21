@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "tool-contract-provenance",
+      "reference": "skills/evidence-harness/references/tool-contract.md",
+      "source_manifest": "skills/evidence-harness/references/source-manifest.json",
+      "sources": ["src/hypotheses.ts", "src/types.ts", "docs/CURRENTPLAN.md"],
+      "assertion": "Every normative tool transition in the reference resolves to a current source locator."
+    }
+  ]
+}

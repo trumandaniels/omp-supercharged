@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "citation-locators-resolve",
+      "reference": "skills/evidence-harness/references/tool-contract.md",
+      "required_locators": [
+        "skills/evidence-harness/references/source-manifest.json",
+        "src/hypotheses.ts",
+        "src/types.ts",
+        "docs/CURRENTPLAN.md"
+      ],
+      "assertion": "All packaged source locators name existing files and relevant sections."
+    }
+  ]
+}

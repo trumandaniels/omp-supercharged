@@ -5,6 +5,16 @@
   "type": "module",
   "description": "Evidence, verification, and adaptive control for Oh My Pi",
   "license": "Apache-2.0",
+  "files": [
+    "config",
+    "docs/CURRENTPLAN.md",
+    "evaluation/fixtures",
+    "evaluation/skills/evidence-harness/evals",
+    "evaluation/suites",
+    "skills",
+    "src",
+    "tests"
+  ],
   "engines": {
     "bun": ">=1.3.14",
     "node": ">=22.6.0"

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "extract-reopen-guard",
+      "source": "src/hypotheses.ts:202-218",
+      "required_terms": [
+        "separate event",
+        "new verified evidence",
+        "verified evidence"
+      ],
+      "assertion": "The skill retains the separate-reopen and verified-evidence requirements without weakening either qualifier."
+    }
+  ]
+}

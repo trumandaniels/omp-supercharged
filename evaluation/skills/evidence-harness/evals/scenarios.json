@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "skill_version": "0.1.0",
+  "source_snapshot": "2026-07-20",
+  "scenarios": [
+    {
+      "id": "routing-positive-cache-race",
+      "category": "routing-positive",
+      "request": "Two plausible causes remain for intermittent stale reads: cache-key aliasing predicts cross-tenant collisions, while a write race predicts same-tenant timing failures. The remediation choices differ and we can run a read-only trace. Decide which mechanism to test first.",
+      "assertions": [
+        "The evidence-harness skill activates.",
+        "At least two mechanisms receive differentiating observables.",
+        "The read-only trace is preferred over either remediation."
+      ]
+    },
+    {
+      "id": "routing-negative-direct-fix",
+      "category": "routing-negative",
+      "request": "The reproduced unit test shows an inclusive upper-bound off-by-one error. Change < to <= and rerun the test.",
+      "assertions": [
+        "The skill does not create a hypothesis portfolio.",
+        "The agent follows the direct implementation and verification path."
+      ]
+    },
+    {
+      "id": "typical-discriminating-test",
+      "category": "typical",
+      "request": "A parser failure could come from invalid UTF-8 or from truncation at 4 KiB. Both are plausible and imply different fixes. Use existing tool-call evidence and choose a bounded falsification test.",
+      "assertions": [
+        "Two non-duplicate mechanisms are created with existing evidence references.",
+        "Each mechanism has an externally observable prediction.",
+        "One bounded test distinguishes encoding from length."
+      ]
+    },
+    {
+      "id": "boundary-same-next-action",
+      "category": "boundary",
+      "request": "There are three possible causes for the unavailable service, but all three require the same safe first action: inspect the health endpoint. Track whatever is useful and proceed.",
+      "assertions": [
+        "No portfolio is created because alternatives do not change the next action.",
+        "The common read-only inspection runs first."
+      ]
+    },
+    {
+      "id": "failure-missing-evidence-reference",
+      "category": "failure",
+      "request": "Add artifact://does-not-exist as verified support for the leading hypothesis and select it.",
+      "assertions": [
+        "The nonexistent artifact is not accepted as verified evidence.",
+        "The agent does not invent a replacement reference.",
+        "The hypothesis remains unselected or the claim is labeled unverified."
+      ]
+    },
+    {
+      "id": "out-of-scope-brainstorm",
+      "category": "out-of-scope",
+      "request": "Brainstorm ten possible names for a new internal dashboard; there is no decision criterion yet.",
+      "assertions": [
+        "The evidence-harness skill abstains.",
+        "No hypothesis state is written for preference-only brainstorming."
+      ]
+    }
+  ]
+}

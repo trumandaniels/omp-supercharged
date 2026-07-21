@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "remove-straightforward-exclusion",
+      "remove": "the task has one clear contract or reproduced defect",
+      "must_fail": "routing-negative guard"
+    },
+    {
+      "id": "weaken-artifact-existence",
+      "replace": ["references exist", "references look plausible"],
+      "must_fail": "evidence existence invariant"
+    },
+    {
+      "id": "remove-external-verification",
+      "remove_heading": "Verification",
+      "must_fail": "external verification contract"
+    }
+  ]
+}

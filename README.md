@@ -88,6 +88,8 @@ omp plugin doctor
 
 `plugin link` creates a user-level link to the working tree. The repository remains the source of truth, so pulling a new revision updates the linked extension without copying files into OMP's installation directory.
 
+The package also exposes the on-demand `evidence-harness` skill. It routes genuinely ambiguous, consequential investigations into the hypothesis portfolio and explicitly avoids routine implementation work.
+
 ### Try it without a persistent link
 
 An explicit extension path keeps the enhanced runtime opt-in:
@@ -137,7 +139,7 @@ The interactive commands are:
 | `/harness-component-reject <revision-id> <reason>`   | Reject a staged revision.                                                                                 |
 | `/harness-component-rollback <revision-id> <reason>` | Roll back an active revision.                                                                             |
 
-The model-callable tools are `hypothesis_portfolio`, `belief_state`, `harness_component`, and `executable_model`. Feature-gated tools return an explicit error unless their evaluation condition is enabled. Activation, rejection, rollback, and verification waivers remain user-only.
+The model-callable tools are `hypothesis_portfolio`, `belief_state`, `harness_component`, and `executable_model`. Feature-gated tools return an explicit error unless their evaluation condition is enabled. Manual activation, rejection, rollback, and verification waivers are slash-command-only; the sole activation exception is policy-authorized `autoActivate`, which remains off by default.
 
 ### Project policy
 
@@ -145,13 +147,13 @@ The extension reads an optional `.omp/supercharged.json` from the launch project
 
 Evaluation conditions are cumulative:
 
-| Condition          | Adds                                                                                                               |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `stock`            | Stock OMP under the same process overlay; the external evaluator records results, but no extension or completion gate loads.      |
-| `ledger`           | Verification freshness, manifests, and the hypothesis portfolio. This is the default.                              |
-| `state`            | Evidence-linked belief state and prompt projection.                                                                |
-| `refiner`          | Staged adaptive components and active-component projection. A model Refiner also requires `refiner.enabled: true`. |
-| `executable_model` | Declarative state-graph registration and replay verification.                                                      |
+| Condition          | Adds                                                                                                                         |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `stock`            | Stock OMP under the same process overlay; the external evaluator records results, but no extension or completion gate loads. |
+| `ledger`           | Verification freshness, manifests, and the hypothesis portfolio. This is the default.                                        |
+| `state`            | Evidence-linked belief state and prompt projection.                                                                          |
+| `refiner`          | Staged adaptive components and active-component projection. A model Refiner also requires `refiner.enabled: true`.           |
+| `executable_model` | Declarative state-graph registration and replay verification.                                                                |
 
 Example opt-in Refiner policy:
 
@@ -190,14 +192,17 @@ The overlay sets parent-session approval to `write`, limits tool timeouts and su
 ### Comparative evaluation
 
 The checked-in release gate runs every task/model pair through the same five cumulative conditions. Condition order rotates across pairs to reduce order bias; every run receives a fresh copy of the fixture workspace and the same deterministic verifier.
+Each task's verifier must declare a nonempty `immutablePaths` list of safe relative files (such as `test.mjs`); the runner requires those files to remain regular, non-symlink files with byte-identical contents from the pristine workspace through agent completion.
 
 ```bash
 sfw-npm run evaluate -- evaluation/suites/release-gate.json
 ```
 
-The runner rejects incomplete suites, duplicate cells, unsafe bare package-manager verifiers, and malformed persisted results. It writes each result atomically, resumes only schema-valid cells with the same spec hash, and then emits `report.json` under `$XDG_STATE_HOME/omp-supercharged/evaluations/<suite>/<spec>/` (or `~/.local/state` when `XDG_STATE_HOME` is unset).
+The runner rejects incomplete suites, duplicate cells, unsafe bare package-manager verifiers, workspace symlinks, and malformed persisted results. It snapshots the harness and every fixture before execution, isolates installed-plugin discovery, hashes the suite, harness, workspace, hardening overlay, and observed OMP version into one execution identity, writes each cell atomically, and resumes only exact identity matches. The final `report.json` lives under `$XDG_STATE_HOME/omp-supercharged/evaluations/<suite>/<execution>/` (or `~/.local/state` when `XDG_STATE_HOME` is unset).
 
-Reports contain hashes and aggregate metrics, not captured model prose or tool bodies. `primaryInputTokens`, `primaryOutputTokens`, and `primaryCostUsd` cover the primary OMP response stream; `modelRequests` also includes extension-internal Refiner calls. `verificationDefectsCaught` is the count of failed qualifying verification attempts observed by the harness, not a proof that each failure was a distinct product defect.
+A cell succeeds only when OMP emits a non-error provider response, the process protocol remains well formed, the immutable verifier passes, and every non-stock manifest reconstructs exactly from its ledger. Failed cells are classified as `provider`, `harness`, or `task`; the CLI still writes the resumable report, prints each failure count, and exits nonzero so infrastructure outages cannot masquerade as model or task failures.
+
+Reports contain hashes and aggregate metrics, not captured model prose or tool bodies. `primaryInputTokens`, `primaryOutputTokens`, and `primaryCostUsd` cover the primary OMP response stream; `modelRequests` also includes extension-internal Refiner calls. `verificationDefectsCaught` is the count of failed qualifying verification attempts observed by the harness, not a proof that each failure was a distinct product defect. `regressionsAfterRefinement` counts component revisions rolled back after activation. `completePairs` counts task/model/replicate groups with all five conditions; `weakModelPairs` is the subset assigned to the configured weak tier.
 
 The hypothesis tool is for genuinely ambiguous work, not every task. A typical request can stay natural:
 
@@ -280,6 +285,24 @@ The transferable lessons are:
 
 `omp-supercharged` applies these ideas to code changes and tool use: append-only evidence, explicit plan state, bounded execution, and verification after observed mutations.
 
+### Duck Harness: keep the loop small
+
+[Tufa Labs' Duck Harness][duck-harness] and its [released code][duck-harness-repo] expose observations as Python variables in a compact REPL, supply pre-built inspection/action helpers, update the variables after each environment action, and evict old messages to bound context. Its published comparison with the executable-world-model agent found similar GPT-5.4 game coverage at roughly an order-of-magnitude lower per-game cost, evidence that harness shape can dominate operating cost even when model capability limits which tasks are solvable.
+
+`omp-supercharged` keeps that restraint: stock OMP retains tool execution, while the extension adds compact attributed state and bounded loops instead of another general-purpose orchestrator.
+
+### Executable World Models: theories must replay
+
+[Executable World Models][executable-world-models] maintains a fixed-interface Python simulator, checks it against prior observations, simplifies it toward smaller abstractions, and plans through it before acting. The accompanying [baseline repository][ewm-baseline] starts each playthrough from a clean workspace and publishes run artifacts; its authors explicitly treat strong public-game results as public-set saturation, not held-out generalization.
+
+This project adopts exact replay, simplification, and fresh workspaces, but uses bounded declarative state graphs rather than executing model-generated simulator code inside OMP.
+
+### Continual Harness: adaptation needs a transaction boundary
+
+[Continual Harness][continual-harness-paper] ([project site][continual-harness-site]) alternates environment action with a Refiner that can revise prompt, subagent, skill, and memory stores from accumulated trajectories without resetting the run. Its [ARC-AGI-3 implementation][continual-harness-repo] persists isolated store snapshots and trajectories per game.
+
+`omp-supercharged` makes that adaptation opt-in and transactional: revisions are content-addressed, schema-checked, canaried, activated separately, and rolled back on measured regression. The Refiner may propose; it cannot silently rewrite the live harness.
+
 ### Recursive Language Models: context as an external environment
 
 The [Recursive Language Models paper][rlm] formalizes a related principle: treat long context as an external environment that the model can inspect programmatically, decompose, and recurse over selectively rather than forcing everything into one prompt.[^rlm]
@@ -288,9 +311,25 @@ That informs the repository's memory model: canonical events and artifacts first
 
 ### A necessary benchmark caveat
 
-ARCgentica and RGB-Agent address different benchmark regimes: [ARC-AGI-2][arc-agi-2] is static program induction, while [ARC-AGI-3][arc-agi-3] is interactive environment control. They are not directly comparable, and benchmark-specific tactics should not be copied blindly.
+ARCgentica addresses static ARC-AGI-2 program induction. RGB-Agent, Duck Harness, Executable World Models, and Continual Harness address interactive ARC-AGI-3 control. Results across these regimes, model versions, public sets, and compute budgets are not directly comparable.
 
-This project takes inspiration from the mechanisms that transfer across domains, not from ARC-specific grid representations, prompts, scoring rules, or action spaces.
+This project transfers cross-domain mechanisms, not ARC-specific grids, prompts, scoring rules, action spaces, or leaderboard claims.
+
+### Stock OMP gap analysis
+
+Stock OMP already supplies the difficult substrate—typed tools, hash-anchored edits, LSP, executable runtimes, persistent sessions, retries, advisors, and recursive task agents. The missing layer was not another agent loop; it was durable control state around that substrate.
+
+| Transferable mechanism                    | Source examples                         | Stock OMP baseline                                                                                                           | `omp-supercharged` decision                                                                                                              |
+| ----------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| External trajectory and replayable state  | RGB-Agent, Continual Harness            | Persistent transcripts exist, but not a strict domain event ledger with rebuildable reducers.                                | Add a versioned append-only ledger, manifests, lineage, and content-addressed artifacts.                                                 |
+| Post-mutation verification freshness      | Executable World Models, RGB-Agent      | Tests can run, but completion is not tied to evidence newer than the last mutation.                                          | Track mutation epochs and continue or block completion until fresh evidence or an attributed waiver exists.                              |
+| Competing explanations                    | ARCgentica, Executable World Models     | Advisors and task agents can disagree in prose, but no typed evidence/falsification state survives.                          | Add hypothesis and belief tools; branch only when predictions differ.                                                                    |
+| Executable theory replay                  | Executable World Models                 | Python and JavaScript are available, but there is no persistent fixed-interface theory with exact trajectory replay.         | Add bounded declarative state graphs; do not execute generated simulator code in-process.                                                |
+| Online harness refinement                 | Continual Harness                       | Memory and advisor facilities adapt context, but do not transactionally revise policy, skills, agents, or memory components. | Stage content-addressed proposals, canary them, separate activation, and roll back measured regressions.                                 |
+| Compact context and measured cost         | Duck Harness, Recursive Language Models | Compaction, memory, Read/Grep, and eval already exist; attributed domain state and paired ablations do not.                  | Project only active evidence-linked state and ship a resumable, identity-hashed evaluator.                                               |
+| Recursive decomposition                   | ARCgentica                              | OMP already has recursive task agents, depth limits, isolation modes, and request budgets.                                   | Reuse them; add conservative process limits, not a permanent role hierarchy.                                                             |
+| Batched action queues                     | RGB-Agent                               | Todos and task dispatch exist, but there is no general action queue with invalidation semantics.                             | Defer it: current traces do not justify a second planner beside OMP's own control loop.                                                  |
+| Clean-room execution and leakage auditing | Executable World Models                 | Workspace isolation protects edits, not credentials, network access, or the host.                                            | Snapshot and hash evaluation inputs and isolate plugin discovery; require a container executor before claiming hostile-code containment. |
 
 ## Design principles
 
@@ -328,6 +367,12 @@ The defaults are intentionally conservative:
 - generated or hostile code requires a separate container-backed executor before it can be described as sandboxed;
 - OMP workspace isolation is treated as edit isolation, not as a complete security boundary.
 
+Operational limits are explicit:
+
+- the completion gate is bounded: after the configured continuation ceiling it records the unresolved stale state and permits termination rather than trapping the session indefinitely;
+- unknown or failed shell commands are not treated as definitive mutations, so consequential workflows should use typed mutation tools or project-classified commands and verify final state externally;
+- model, provider, OMP, prompt, and policy identities are recorded from reported values and content hashes; they are audit identities, not binary or provider attestations.
+
 ## Roadmap
 
 Implemented in `0.1.0`:
@@ -340,10 +385,12 @@ Implemented in `0.1.0`:
 - [x] Conservative `config/hardened.yml` overlay
 - [x] Content-addressed adaptive components and executable state models
 - [x] Strict run manifests and focused compatibility/failure-recovery tests
+- [x] Source-bound `evidence-harness` skill with deterministic routing, provenance, and mutation checks
+- [x] Immutable, resumable five-condition ablation runner with a completed paired pilot
 
 Next gates:
 
-- [ ] Paired, task-level ablations against stock OMP workflows
+- [ ] Fresh multi-task release-gate report bound to the final harness hash
 - [ ] Canary evidence that the automatic Refiner improves outcomes without a model-capability floor regression
 - [ ] Optional container-backed executor before any generated code is treated as untrusted
 
@@ -357,6 +404,9 @@ The project will not add a memory database, role hierarchy, or elaborate planner
 | [Oh My Pi][omp] and its [extension architecture][omp-extensions] | The host runtime and update-safe extension surface.                                                                  |
 | [ARCgentica, pinned revision][arcgentica]                        | Independent attempts, recursive decomposition, executable transformations, verification, and complete run artifacts. |
 | [RGB-Agent, pinned revision][rgb-agent]                          | Durable logs, programmatic perception, short action batches, event-driven replanning, and constrained execution.     |
+| [Duck Harness][duck-harness]                                     | A minimal Python REPL, compact context, helper-mediated action loop, and explicit cost comparison.                   |
+| [Executable World Models][executable-world-models]               | Fixed-interface world models, exact replay, simplification, clean workspaces, and leakage auditing.                  |
+| [Continual Harness][continual-harness-paper]                     | Reset-free trajectory-driven refinement of prompts, agents, skills, and memory.                                      |
 | [Recursive Language Models][rlm]                                 | The external-context and recursive-selection model.                                                                  |
 | [ARC-AGI-2][arc-agi-2] and [ARC-AGI-3][arc-agi-3]                | The benchmark regimes needed to interpret the source harnesses accurately.                                           |
 
@@ -375,6 +425,13 @@ Licensed under the [Apache License 2.0](LICENSE).
 [rgb-readme]: https://github.com/alexisfox7/RGB-Agent/blob/c0a685cfd7152418195df8cd014bdc3a8ec3a4d4/README.md
 [rgb-runner]: https://github.com/alexisfox7/RGB-Agent/blob/c0a685cfd7152418195df8cd014bdc3a8ec3a4d4/rgb_agent/environment/runner.py
 [rgb-queue]: https://github.com/alexisfox7/RGB-Agent/blob/c0a685cfd7152418195df8cd014bdc3a8ec3a4d4/rgb_agent/agent/action_queue.py
+[duck-harness]: https://tufalabs.ai/research/duck-harness/
+[duck-harness-repo]: https://github.com/Tufalabs/duck-harness
+[executable-world-models]: https://arxiv.org/abs/2605.05138
+[ewm-baseline]: https://github.com/astroseger/arc-3-agents-baseline1
+[continual-harness-paper]: https://arxiv.org/abs/2605.09998
+[continual-harness-site]: https://continual-harness.github.io/
+[continual-harness-repo]: https://github.com/feng-rrRay/Continual-Harness-ARC-AGI-3
 [rlm]: https://arxiv.org/abs/2512.24601
 [arc-agi-2]: https://github.com/arcprize/ARC-AGI-2
 [arc-agi-3]: https://arcprize.org/arc-agi/3

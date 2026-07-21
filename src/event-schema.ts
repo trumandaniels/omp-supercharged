@@ -1,3 +1,4 @@
+import { validateStateGraphModel } from "./executable-model.ts";
 import type { RunEventKind, RunEventV1 } from "./types.ts";
 
 const EVENT_KINDS: Record<RunEventKind, true> = {
@@ -105,6 +106,7 @@ const DATA_KEYS: Record<RunEventKind, Record<string, true>> = {
     operation: true,
     modelId: true,
     contentHash: true,
+    model: true,
     replay: true,
   },
   refiner_started: {
@@ -160,7 +162,7 @@ const DATA_REQUIRED: Record<RunEventKind, readonly string[]> = {
     "validationErrors",
     "proposedBy",
   ],
-  executable_model_changed: ["operation", "modelId", "contentHash"],
+  executable_model_changed: ["operation", "modelId", "contentHash", "model"],
   refiner_started: ["trigger", "runNumber", "snapshotHash", "model"],
   refiner_finished: ["trigger", "runNumber", "proposalCount", "activatedCount"],
   extension_error: ["scope", "message"],
@@ -209,7 +211,7 @@ function assertExactKeys(
   context: string,
 ): void {
   for (const key of Object.keys(value)) {
-    if (!allowed[key])
+    if (!Object.hasOwn(allowed, key))
       throw new TypeError(`${context} contains unknown field ${key}`);
   }
 }
@@ -231,7 +233,8 @@ function assertRequiredKeys(
   context: string,
 ): void {
   for (const key of required) {
-    if (!(key in value)) throw new TypeError(`${context} requires ${key}`);
+    if (!Object.hasOwn(value, key))
+      throw new TypeError(`${context} requires ${key}`);
   }
 }
 
@@ -902,6 +905,7 @@ function validateRunEventData(
       );
       assertString(data.modelId, "executable_model_changed.modelId");
       assertHash(data.contentHash, "executable_model_changed.contentHash");
+      validateStateGraphModel(data.model);
       if (data.operation === "replay")
         validateReplay(data.replay, "executable_model_changed.replay");
       else if (data.replay !== undefined)
@@ -964,12 +968,12 @@ export function validateRunEvent(value: unknown): asserts value is RunEventV1 {
   assertString(event.runId, "Run event runId");
   assertInteger(event.sequence, "Run event sequence", 1);
   assertTimestamp(event.occurredAt, "Run event occurredAt");
-  if (
-    typeof event.kind !== "string" ||
-    !EVENT_KINDS[event.kind as RunEventKind]
-  )
+  if (typeof event.kind !== "string" || !Object.hasOwn(EVENT_KINDS, event.kind))
     throw new TypeError("Unknown run event kind");
-  if (typeof event.status !== "string" || !STATUSES[event.status])
+  if (
+    typeof event.status !== "string" ||
+    !Object.hasOwn(STATUSES, event.status)
+  )
     throw new TypeError("Unknown run event status");
   if (event.sessionRef !== undefined)
     assertString(event.sessionRef, "sessionRef");

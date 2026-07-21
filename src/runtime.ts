@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -12,12 +14,19 @@ import {
   type BeliefMutationInput,
   type BeliefReadInput,
 } from "./beliefs.ts";
-import { canonicalJson, cloneJson, hashJson, newId } from "./canonical.ts";
+import {
+  canonicalJson,
+  cloneJson,
+  hashJson,
+  newId,
+  sha256Bytes,
+} from "./canonical.ts";
 import {
   classifyToolCall,
   type ClassificationResult,
 } from "./classification.ts";
 import {
+  assertComponentRevisionCanActivate,
   activateComponentRevision,
   componentKey,
   componentRevisionEntry,
@@ -110,7 +119,6 @@ interface ToolCallMetadata {
   startedAt: number;
   inputHash: string;
   classification: ClassificationResult;
-  observationBefore: HarnessStateV1["lastObservationRef"];
 }
 
 interface HypothesisSessionEntryV1 {
@@ -206,6 +214,13 @@ function parseCommandParts(args: string): string[] {
   return args.trim().split(/\s+/u).filter(Boolean);
 }
 
+class RefinerShutdownError extends Error {
+  constructor(cause: unknown) {
+    super("Refiner pass was cancelled during session shutdown", { cause });
+    this.name = "RefinerShutdownError";
+  }
+}
+
 export class HarnessRuntime {
   readonly pi: ExtensionAPI;
   #ledger?: RunLedger;
@@ -220,7 +235,10 @@ export class HarnessRuntime {
   #revisions = new Map<string, ComponentRevisionV1>();
   #models = new Map<string, StateGraphModelV1>();
   #pendingRefiner?: Timer;
-  #refinerInFlight = false;
+  #refinerTask?: Promise<void>;
+  #cancelRefiner?: () => Promise<void>;
+  #componentQueue: Promise<void> = Promise.resolve();
+  #toolResultQueue: Promise<void> = Promise.resolve();
   #closed = false;
   #closing = false;
 
@@ -286,9 +304,9 @@ export class HarnessRuntime {
     this.pi.on("tool_call", async (event) => {
       await this.handleToolCall(event);
     });
-    this.pi.on("tool_result", async (event, ctx) => {
-      await this.handleToolResult(event, ctx);
-    });
+    this.pi.on("tool_result", (event, ctx) =>
+      this.enqueueToolResult(event, ctx),
+    );
     this.pi.on("auto_retry_start", async (event) => {
       if (!this.ready) return;
       await this.append({
@@ -370,7 +388,11 @@ export class HarnessRuntime {
         "Run one bounded Refiner pass when the refiner ablation is enabled",
       handler: async (args, ctx) => {
         this.requireFeature("refiner", "Refiner");
-        await this.runRefinement(
+        if (!this.policy.refiner.enabled)
+          throw new Error(
+            "Refiner is disabled by project policy (refiner.enabled=false)",
+          );
+        await this.startRefinement(
           "manual",
           ctx,
           undefined,
@@ -405,12 +427,7 @@ export class HarnessRuntime {
         const [revisionId, ...rest] = parseCommandParts(args);
         if (!revisionId || rest.length > 0)
           throw new Error("Usage: /harness-component-accept <revision-id>");
-        const revision = this.requireRevision(revisionId);
-        const active = activateComponentRevision(
-          revision,
-          this.metricSnapshot(),
-        );
-        await this.persistComponentLifecycle(active);
+        const active = await this.activateCurrentRevision(revisionId);
         this.notify(
           ctx,
           `Activated ${active.componentKind}:${active.name} revision ${active.id}.`,
@@ -426,11 +443,10 @@ export class HarnessRuntime {
           throw new Error(
             "Usage: /harness-component-reject <revision-id> <reason>",
           );
-        const rejected = rejectComponentRevision(
-          this.requireRevision(revisionId),
+        const rejected = await this.rejectCurrentRevision(
+          revisionId,
           reasonParts.join(" "),
         );
-        await this.persistComponentLifecycle(rejected);
         this.notify(ctx, `Rejected revision ${rejected.id}.`, "warning");
       },
     });
@@ -443,12 +459,10 @@ export class HarnessRuntime {
           throw new Error(
             "Usage: /harness-component-rollback <revision-id> <reason>",
           );
-        const rolledBack = rollbackComponentRevision(
-          this.requireRevision(revisionId),
+        const rolledBack = await this.rollbackCurrentRevision(
+          revisionId,
           reasonParts.join(" "),
-          this.metricSnapshot(),
         );
-        await this.persistComponentLifecycle(rolledBack);
         this.notify(ctx, `Rolled back revision ${rolledBack.id}.`, "warning");
       },
     });
@@ -1088,7 +1102,6 @@ export class HarnessRuntime {
       startedAt: Date.now(),
       inputHash,
       classification,
-      observationBefore: cloneJson(this.state.lastObservationRef),
     });
     await this.append({
       kind: "tool_called",
@@ -1104,11 +1117,22 @@ export class HarnessRuntime {
     } as RunEventDraftV1);
   }
 
+  private enqueueToolResult(
+    event: ToolResultEvent,
+    ctx: ExtensionContext,
+  ): Promise<void> {
+    if (!this.ready) return Promise.resolve();
+    const result = this.#toolResultQueue.then(() =>
+      this.handleToolResult(event, ctx),
+    );
+    this.#toolResultQueue = result;
+    return result;
+  }
+
   private async handleToolResult(
     event: ToolResultEvent,
     ctx: ExtensionContext,
   ): Promise<void> {
-    if (!this.ready) return;
     const metadata = this.#toolCalls.get(event.toolCallId);
     this.#toolCalls.delete(event.toolCallId);
     let inputHash: string;
@@ -1139,8 +1163,7 @@ export class HarnessRuntime {
       version: 1,
       kind: "transition",
       id: newId("transition"),
-      observationBefore:
-        metadata?.observationBefore ?? cloneJson(this.state.lastObservationRef),
+      observationBefore: cloneJson(this.state.lastObservationRef),
       action: {
         version: 1,
         kind: "action",
@@ -1247,14 +1270,13 @@ export class HarnessRuntime {
     await this.restoreBranchState(ctx);
   }
 
-  private async handleStop(
-    turnId: number,
-  ): Promise<{
+  private async handleStop(turnId: number): Promise<{
     continue?: boolean;
     additionalContext?: string;
     decision?: "block";
     reason?: string;
   } | void> {
+    await this.#toolResultQueue;
     if (!this.ready || !this.hasFeature("ledger")) return;
     const decision = decideStop(
       this.state,
@@ -1379,8 +1401,19 @@ export class HarnessRuntime {
     this.notify(ctx, rows.join("\n"));
   }
 
-  private async exportManifest(ctx?: ExtensionCommandContext): Promise<void> {
-    this.requireReady();
+  private async exportManifest(
+    ctx?: ExtensionCommandContext,
+    final = false,
+  ): Promise<void> {
+    await this.#toolResultQueue;
+    if (!final) this.requireReady();
+    else if (
+      !this.#ledger ||
+      !this.#paths ||
+      !this.#loadedPolicy ||
+      !this.#state
+    )
+      throw new Error("Harness run is not initialized");
     await this.ledger.flush();
     const events = await this.ledger.readCanonical();
     const manifest = deriveManifest(
@@ -1413,7 +1446,25 @@ export class HarnessRuntime {
       this.#closing = false;
       return;
     }
+    let failure: unknown;
     try {
+      await this.#toolResultQueue;
+      const refinerTask = this.#refinerTask;
+      if (refinerTask) {
+        try {
+          await this.#cancelRefiner?.();
+        } catch (error) {
+          failure = error;
+        }
+        try {
+          await refinerTask;
+        } catch (error) {
+          if (!(error instanceof RefinerShutdownError) && failure === undefined)
+            failure = error;
+        }
+      }
+      await this.#componentQueue;
+      if (failure !== undefined) throw failure;
       await this.append(
         {
           kind: "run_finished",
@@ -1422,22 +1473,25 @@ export class HarnessRuntime {
         } as RunEventDraftV1,
         true,
       );
-      await this.exportManifest();
+      await this.exportManifest(undefined, true);
     } catch (error) {
+      failure = error;
       this.pi.logger.error("omp-supercharged shutdown persistence failed", {
         error: safeError(error),
       });
+    }
+    try {
+      await this.ledger.close();
+    } catch (error) {
+      this.pi.logger.error("omp-supercharged ledger close failed", {
+        error: safeError(error),
+      });
+      if (failure === undefined) failure = error;
     } finally {
-      await this.ledger
-        .close()
-        .catch((error) =>
-          this.pi.logger.error("omp-supercharged ledger close failed", {
-            error: safeError(error),
-          }),
-        );
       this.#closed = true;
       this.#closing = false;
     }
+    if (failure !== undefined) throw failure;
   }
 
   private async restoreBranchState(ctx: ExtensionContext): Promise<void> {
@@ -1445,8 +1499,7 @@ export class HarnessRuntime {
     const beliefs = new Map<string, BeliefSessionEntryV1>();
     const componentEntries = new Map<string, ComponentRevisionEntryV1>();
     const activeComponents = new Map<string, string>();
-    const modelEntries = new Map<string, ModelSessionEntryV1>();
-    const replays: ReplayRecordV1[] = [];
+    const modelEntries: ModelSessionEntryV1[] = [];
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== "custom") continue;
       const data = entry.data;
@@ -1491,9 +1544,7 @@ export class HarnessRuntime {
         record.kind === "state_graph_model_ref"
       ) {
         const item = record as unknown as ModelSessionEntryV1;
-        if (item.operation === "replay" && item.replay)
-          replays.push(item.replay);
-        else if (item.modelId) modelEntries.set(item.modelId, item);
+        if (item.modelId) modelEntries.push(item);
       }
     }
     for (const item of hypotheses.values()) {
@@ -1533,7 +1584,6 @@ export class HarnessRuntime {
           parentEventId: item.revisionId,
           data,
         } as RunEventDraftV1);
-        this.state.components[revision.id] = revision;
       } catch (error) {
         await this.append({
           kind: "extension_error",
@@ -1543,8 +1593,30 @@ export class HarnessRuntime {
       }
     }
     this.state.activeComponents = Object.fromEntries(activeComponents);
-    for (const item of modelEntries.values()) {
+    for (const item of modelEntries) {
       try {
+        if (item.operation === "replay") {
+          if (!item.replay)
+            throw new TypeError("Replay branch entry is missing replay data");
+          const model = this.#models.get(item.modelId);
+          if (!model)
+            throw new Error(
+              `Replay branch entry references unknown model ${item.modelId}`,
+            );
+          await this.append({
+            kind: "executable_model_changed",
+            status: item.replay.matched ? "ok" : "error",
+            parentEventId: item.ledgerEventId,
+            data: {
+              operation: "replay",
+              modelId: model.id,
+              contentHash: item.contentHash,
+              model: model as unknown as JsonObject,
+              replay: item.replay as unknown as JsonObject,
+            },
+          } as RunEventDraftV1);
+          continue;
+        }
         const model = await restoreStateGraphModel(
           this.paths.modelsRoot,
           item.contentHash,
@@ -1555,12 +1627,12 @@ export class HarnessRuntime {
           status: "ok",
           parentEventId: item.ledgerEventId,
           data: {
-            operation: "reconstructed",
+            operation: item.operation,
             modelId: model.id,
             contentHash: item.contentHash,
+            model: model as unknown as JsonObject,
           },
         } as RunEventDraftV1);
-        this.state.executableModels[model.id] = model;
       } catch (error) {
         await this.append({
           kind: "extension_error",
@@ -1569,7 +1641,6 @@ export class HarnessRuntime {
         } as RunEventDraftV1);
       }
     }
-    this.state.replayRecords = replays;
   }
 
   private async stageProposal(
@@ -1607,6 +1678,65 @@ export class HarnessRuntime {
     return latest;
   }
 
+  private enqueueComponentOperation<T>(callback: () => Promise<T>): Promise<T> {
+    const operation = this.#componentQueue.then(callback);
+    this.#componentQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private activateCurrentRevision(
+    revisionId: string,
+  ): Promise<ComponentRevisionV1> {
+    return this.enqueueComponentOperation(async () => {
+      this.requireReady();
+      const revision = this.requireRevision(revisionId);
+      const key = componentKey(revision.componentKind, revision.name);
+      const currentParent = this.state.activeComponents[key];
+      if (currentParent !== revision.parentRevisionId)
+        throw new Error(
+          `Component revision ${revision.id} is stale: expected active parent ${revision.parentRevisionId ?? "none"}, current parent is ${currentParent ?? "none"}`,
+        );
+      assertComponentRevisionCanActivate(revision, this.activeRevisions());
+      const active = activateComponentRevision(revision, this.metricSnapshot());
+      await this.persistComponentLifecycle(active);
+      return active;
+    });
+  }
+
+  private rejectCurrentRevision(
+    revisionId: string,
+    reason: string,
+  ): Promise<ComponentRevisionV1> {
+    return this.enqueueComponentOperation(async () => {
+      this.requireReady();
+      const rejected = rejectComponentRevision(
+        this.requireRevision(revisionId),
+        reason,
+      );
+      await this.persistComponentLifecycle(rejected);
+      return rejected;
+    });
+  }
+
+  private rollbackCurrentRevision(
+    revisionId: string,
+    reason: string,
+  ): Promise<ComponentRevisionV1> {
+    return this.enqueueComponentOperation(async () => {
+      this.requireReady();
+      const rolledBack = rollbackComponentRevision(
+        this.requireRevision(revisionId),
+        reason,
+        this.metricSnapshot(),
+      );
+      await this.persistComponentLifecycle(rolledBack);
+      return rolledBack;
+    });
+  }
+
   private async persistComponentLifecycle(
     revision: ComponentRevisionV1,
     reconstructed = false,
@@ -1628,7 +1758,6 @@ export class HarnessRuntime {
       true,
     );
     this.#revisions.set(revision.id, revision);
-    this.state.components[revision.id] = revision;
     this.pi.appendEntry(COMPONENT_ENTRY, componentRevisionEntry(revision));
     return event;
   }
@@ -1645,12 +1774,16 @@ export class HarnessRuntime {
       {
         kind: "executable_model_changed",
         status: "ok",
-        data: { operation, modelId: model.id, contentHash },
+        data: {
+          operation,
+          modelId: model.id,
+          contentHash,
+          model: model as unknown as JsonObject,
+        },
       } as RunEventDraftV1,
       true,
     );
     this.#models.set(model.id, model);
-    this.state.executableModels[model.id] = model;
     this.pi.appendEntry(MODEL_ENTRY, {
       version: 1,
       kind: "state_graph_model_ref",
@@ -1674,12 +1807,12 @@ export class HarnessRuntime {
           operation: "replay",
           modelId: model.id,
           contentHash,
+          model: model as unknown as JsonObject,
           replay: replay as unknown as JsonObject,
         },
       } as RunEventDraftV1,
       true,
     );
-    this.state.replayRecords.push(replay);
     this.pi.appendEntry(MODEL_ENTRY, {
       version: 1,
       kind: "state_graph_model_ref",
@@ -1706,20 +1839,37 @@ export class HarnessRuntime {
     if (
       triggers.length === 0 ||
       this.#pendingRefiner ||
-      this.#refinerInFlight ||
+      this.#refinerTask ||
       !ctx
     )
       return;
     const trigger = triggers[0];
     this.#pendingRefiner = ctx.setTimeout(async () => {
       this.#pendingRefiner = undefined;
-      await this.runRefinement(trigger, ctx, latestEvent.eventId).catch(
+      await this.startRefinement(trigger, ctx, latestEvent.eventId).catch(
         (error) =>
           this.pi.logger.warn("omp-supercharged automatic refiner failed", {
             error: safeError(error),
           }),
       );
     }, 0);
+  }
+
+  private startRefinement(
+    trigger: RefinerTrigger | "manual",
+    ctx: ExtensionContext,
+    triggerEventId?: string,
+    manualReason?: string,
+  ): Promise<void> {
+    if (this.#refinerTask)
+      return Promise.reject(new Error("A Refiner pass is already running"));
+    const task = this.runRefinement(trigger, ctx, triggerEventId, manualReason);
+    this.#refinerTask = task;
+    const clear = () => {
+      if (this.#refinerTask === task) this.#refinerTask = undefined;
+    };
+    void task.then(clear, clear);
+    return task;
   }
 
   private async runRefinement(
@@ -1729,8 +1879,10 @@ export class HarnessRuntime {
     manualReason?: string,
   ): Promise<void> {
     this.requireReady();
-    if (this.#refinerInFlight)
-      throw new Error("A Refiner pass is already running");
+    if (!this.policy.refiner.enabled)
+      throw new Error(
+        "Refiner is disabled by project policy (refiner.enabled=false)",
+      );
     if (this.state.refinerRuns >= this.policy.refiner.maxRuns)
       throw new Error(
         `Refiner run ceiling ${this.policy.refiner.maxRuns} reached`,
@@ -1768,7 +1920,6 @@ export class HarnessRuntime {
       } as RunEventDraftV1,
       true,
     );
-    this.#refinerInFlight = true;
     let proposalCount = 0;
     let activatedCount = 0;
     try {
@@ -1785,9 +1936,7 @@ export class HarnessRuntime {
           this.policy.refiner.autoActivate &&
           staged.status === "canary_valid"
         ) {
-          await this.persistComponentLifecycle(
-            activateComponentRevision(staged, this.metricSnapshot()),
-          );
+          await this.activateCurrentRevision(staged.id);
           activatedCount++;
         }
       }
@@ -1816,9 +1965,8 @@ export class HarnessRuntime {
         } as RunEventDraftV1,
         true,
       );
+      if (this.#closing) throw new RefinerShutdownError(error);
       throw error;
-    } finally {
-      this.#refinerInFlight = false;
     }
   }
 
@@ -1860,13 +2008,27 @@ export class HarnessRuntime {
           hasUI: false,
           autoApprove: false,
         });
+        const session = result.session;
+        let disposed = false;
+        const dispose = async () => {
+          if (disposed) return;
+          disposed = true;
+          await session.dispose();
+        };
+        const cancel = async () => {
+          if ("abort" in session && typeof session.abort === "function")
+            await session.abort();
+          else await dispose();
+        };
+        this.#cancelRefiner = cancel;
         try {
-          await result.session.prompt(userPrompt, {
+          await session.prompt(userPrompt, {
             expandPromptTemplates: false,
           });
-          return assistantText(result.session.messages);
+          return assistantText(session.messages);
         } finally {
-          await result.session.dispose();
+          if (this.#cancelRefiner === cancel) this.#cancelRefiner = undefined;
+          await dispose();
         }
       },
     };
@@ -1876,12 +2038,10 @@ export class HarnessRuntime {
     const metrics = this.metricSnapshot();
     for (const revision of this.activeRevisions()) {
       if (!shouldRollbackComponent(revision, metrics)) continue;
-      const rolledBack = rollbackComponentRevision(
-        revision,
+      await this.rollbackCurrentRevision(
+        revision.id,
         "Automatic rollback: post-activation verification or regression threshold exceeded",
-        metrics,
       );
-      await this.persistComponentLifecycle(rolledBack);
     }
   }
 
@@ -1911,10 +2071,7 @@ export class HarnessRuntime {
     if (reference.kind === "tool_call")
       return this.#toolCallIds.has(reference.ref);
     if (reference.kind === "artifact")
-      return (
-        reference.ref.startsWith("artifact://") ||
-        this.state.artifactRefs.includes(reference.ref)
-      );
+      return this.artifactReferenceExists(reference.ref);
     return true;
   }
 
@@ -1922,8 +2079,21 @@ export class HarnessRuntime {
     return (
       this.#eventIds.has(reference) ||
       this.#toolCallIds.has(reference) ||
-      reference.startsWith("artifact://")
+      this.artifactReferenceExists(reference)
     );
+  }
+
+  private artifactReferenceExists(reference: string): boolean {
+    if (!this.state.artifactRefs.includes(reference)) return false;
+    const match = /^artifact:\/\/(sha256:[a-f0-9]{64})$/u.exec(reference);
+    if (!match) return false;
+    const digest = match[1];
+    try {
+      const content = readFileSync(join(this.paths.artifactsRoot, digest));
+      return sha256Bytes(content) === digest;
+    } catch {
+      return false;
+    }
   }
 
   private requireRevision(revisionId: string): ComponentRevisionV1 {
@@ -1985,7 +2155,8 @@ export class HarnessRuntime {
         this.#paths &&
         this.#loadedPolicy &&
         this.#state &&
-        !this.#closed,
+        !this.#closed &&
+        !this.#closing,
     );
   }
 

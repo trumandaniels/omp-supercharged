@@ -12,6 +12,21 @@ import type {
   PredictionV1,
 } from "./types.ts";
 
+const EVIDENCE_KINDS: Record<string, true> = {
+  run_event: true,
+  tool_call: true,
+  artifact: true,
+  unverified_note: true,
+};
+
+const HYPOTHESIS_STATUSES: Record<HypothesisStatus, true> = {
+  live: true,
+  falsified: true,
+  dominated: true,
+  selected: true,
+  deferred: true,
+};
+
 export type HypothesisMutationInput =
   | {
       operation: "create";
@@ -56,13 +71,7 @@ function validateEvidenceReference(
 ): void {
   if (!evidence || typeof evidence !== "object")
     throw new TypeError("Evidence reference must be an object");
-  const allowedKinds: Record<string, true> = {
-    run_event: true,
-    tool_call: true,
-    artifact: true,
-    unverified_note: true,
-  };
-  if (!allowedKinds[evidence.kind])
+  if (!Object.hasOwn(EVIDENCE_KINDS, evidence.kind))
     throw new TypeError("Evidence reference kind is invalid");
   assertNonEmptyString(evidence.ref, "evidence.ref", 1_000);
   if (evidence.kind === "unverified_note") {
@@ -112,13 +121,13 @@ function validateFalsificationTest(test: FalsificationTestV1): void {
 }
 
 function requireHypothesis(
-  portfolio: Record<string, HypothesisV1>,
+  portfolio: Readonly<Record<string, HypothesisV1>>,
   id: string,
 ): HypothesisV1 {
   assertNonEmptyString(id, "hypothesis.id", 200);
-  const hypothesis = portfolio[id];
-  if (!hypothesis) throw new TypeError(`Unknown hypothesis ${id}`);
-  return cloneJson(hypothesis);
+  if (!Object.hasOwn(portfolio, id))
+    throw new TypeError(`Unknown hypothesis ${id}`);
+  return cloneJson(portfolio[id]);
 }
 
 export function applyHypothesisMutation(
@@ -130,7 +139,6 @@ export function applyHypothesisMutation(
     referenceExists?: (reference: EvidenceRefV1) => boolean;
   } = {},
 ): HypothesisMutationResult {
-  const mutable = portfolio as Record<string, HypothesisV1>;
   const now = options.now ?? new Date().toISOString();
   const idFactory = options.idFactory ?? newId;
   const referenceExists = options.referenceExists ?? (() => false);
@@ -139,7 +147,8 @@ export function applyHypothesisMutation(
     assertFiniteUnitInterval(input.confidence, "hypothesis.confidence");
     const id = input.id?.trim() || idFactory("hypothesis");
     assertNonEmptyString(id, "hypothesis.id", 200);
-    if (mutable[id]) throw new TypeError(`Hypothesis ${id} already exists`);
+    if (Object.hasOwn(portfolio, id))
+      throw new TypeError(`Hypothesis ${id} already exists`);
     const hypothesis: HypothesisV1 = {
       version: 1,
       kind: "hypothesis",
@@ -155,7 +164,7 @@ export function applyHypothesisMutation(
     };
     return { operation: input.operation, hypothesis };
   }
-  const hypothesis = requireHypothesis(mutable, input.id);
+  const hypothesis = requireHypothesis(portfolio, input.id);
   if (input.operation === "add_evidence") {
     validateEvidenceReference(input.evidence, referenceExists);
     const target =
@@ -190,14 +199,7 @@ export function applyHypothesisMutation(
     assertFiniteUnitInterval(input.confidence, "hypothesis.confidence");
     hypothesis.confidence = input.confidence;
   } else if (input.operation === "set_status") {
-    const statuses: Record<HypothesisStatus, true> = {
-      live: true,
-      falsified: true,
-      dominated: true,
-      selected: true,
-      deferred: true,
-    };
-    if (!statuses[input.status])
+    if (!Object.hasOwn(HYPOTHESIS_STATUSES, input.status))
       throw new TypeError("Invalid hypothesis status");
     if (hypothesis.status === "falsified") {
       if (input.status === "selected")
@@ -228,11 +230,7 @@ export function readHypotheses(
   portfolio: Readonly<Record<string, HypothesisV1>>,
   input: HypothesisReadInput,
 ): HypothesisV1[] | HypothesisV1 {
-  if (input.operation === "get")
-    return requireHypothesis(
-      portfolio as Record<string, HypothesisV1>,
-      input.id,
-    );
+  if (input.operation === "get") return requireHypothesis(portfolio, input.id);
   return Object.values(portfolio)
     .map((hypothesis) => cloneJson(hypothesis))
     .sort((left, right) => left.id.localeCompare(right.id));

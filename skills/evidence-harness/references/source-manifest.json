@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "kind": "skill_source_manifest",
+  "skill": "evidence-harness",
+  "skill_version": "0.1.0",
+  "source_snapshot": "2026-07-20",
+  "sources": [
+    {
+      "path": "src/hypotheses.ts",
+      "sha256": "b2a38c315a6221956b73cbd1cee541ae21c664c07dbb3fc4f9eea84730fc3905",
+      "source_class": "primary",
+      "role": "Executable portfolio operations, evidence validation, and lifecycle transition rules",
+      "locators": [
+        "HypothesisMutationInput",
+        "HypothesisReadInput",
+        "validateEvidence",
+        "applyHypothesisMutation",
+        "readHypotheses"
+      ]
+    },
+    {
+      "path": "src/types.ts",
+      "sha256": "6ee2d00a7f9c9f24713f272172c4926d6d04a59ebf61ae14268342171695f362",
+      "source_class": "primary",
+      "role": "Versioned evidence, prediction, falsification-test, hypothesis, and persisted operation schemas",
+      "locators": [
+        "EvidenceRefV1",
+        "PredictionV1",
+        "FalsificationTestV1",
+        "HypothesisV1",
+        "HypothesisOperation"
+      ]
+    },
+    {
+      "path": "docs/CURRENTPLAN.md",
+      "sha256": "1427cf55303b574ca264c9157937f9298fcfdc63fc6ef7514e8d7b549d3677b6",
+      "source_class": "primary",
+      "role": "Release routing criteria, skill acceptance gate, and operational boundaries",
+      "locators": ["Workstream G: hypothesis portfolio tool", "Acceptance gate"]
+    }
+  ]
+}

@@ -70,10 +70,8 @@ function assertKeys(
   allowed: readonly string[],
   context: string,
 ): void {
-  const lookup: Record<string, true> = {};
-  for (const key of allowed) lookup[key] = true;
   for (const key of Object.keys(value))
-    if (!lookup[key])
+    if (!allowed.includes(key))
       throw new TypeError(`${context} contains unknown field ${key}`);
 }
 

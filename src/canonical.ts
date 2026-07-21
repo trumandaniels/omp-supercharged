@@ -30,7 +30,7 @@ export function toCanonicalValue(
       throw new TypeError(
         "Canonical JSON accepts only arrays and plain objects",
       );
-    const output: JsonObject = {};
+    const output: JsonObject = Object.create(null) as JsonObject;
     for (const key of Object.keys(value).sort()) {
       const item = value[key];
       if (item === undefined)

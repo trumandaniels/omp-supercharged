@@ -325,6 +325,22 @@ export interface ComponentRevisionV1 {
   createdAt: string;
   updatedAt: string;
 }
+export interface ComponentRevisionRefV1 {
+  version: 1;
+  kind: "component_revision_ref";
+  revisionId: string;
+  componentKind: ComponentKind;
+  name: string;
+  lifecycle: ComponentStatus;
+  contentHash: string;
+  parentRevisionId?: string;
+  validators: string[];
+  validationErrors: string[];
+  proposedBy: ComponentRevisionV1["proposedBy"];
+  triggerEventId?: string;
+  metrics?: ComponentMetricSnapshotV1;
+  reconstructed?: boolean;
+}
 
 export interface StateGraphTransitionV1 {
   from: string;
@@ -464,7 +480,7 @@ export interface HarnessStateV1 {
   verification: VerificationStateV1;
   hypotheses: Record<string, HypothesisV1>;
   beliefs: BeliefStateV1;
-  components: Record<string, ComponentRevisionV1>;
+  components: Record<string, ComponentRevisionRefV1>;
   activeComponents: Record<string, string>;
   executableModels: Record<string, StateGraphModelV1>;
   replayRecords: ReplayRecordV1[];
@@ -512,6 +528,7 @@ export interface RunManifestV1 {
 }
 
 export type EvaluationModelTier = "strong" | "weak";
+export type EvaluationFailureClass = "provider" | "harness" | "task";
 
 export interface EvaluationModelV1 {
   id: string;
@@ -522,6 +539,7 @@ export interface EvaluationVerifierV1 {
   command: string;
   args: string[];
   timeoutMs: number;
+  immutablePaths: string[];
 }
 
 export interface EvaluationTaskV1 {
@@ -565,6 +583,7 @@ export interface EvaluationRunV1 extends EvaluationExecutionIdentityV1 {
   promptHash: string;
   startedAt: string;
   success: boolean;
+  failureClass?: EvaluationFailureClass;
   actions: number;
   modelRequests: number;
   elapsedMs: number;
@@ -586,6 +605,9 @@ export interface EvaluationConditionSummaryV1 {
   runs: number;
   successes: number;
   successRate: number;
+  providerFailures: number;
+  harnessFailures: number;
+  taskFailures: number;
   medianActions: number;
   medianModelRequests: number;
   medianElapsedMs: number;

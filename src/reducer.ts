@@ -1,11 +1,22 @@
-import { cloneJson } from "./canonical.ts";
+import { isDeepStrictEqual } from "node:util";
+import { cloneJson, hashJson } from "./canonical.ts";
+import {
+  simplifyStateGraph,
+  validateStateGraphModel,
+} from "./executable-model.ts";
 import type {
   BeliefClaimV1,
+  ComponentKind,
+  ComponentMetricSnapshotV1,
+  ComponentRevisionRefV1,
+  ComponentStatus,
   HarnessStateV1,
   HypothesisStatus,
   HypothesisV1,
   JsonObject,
   ObservationRefV1,
+  ReplayRecordV1,
+  StateGraphModelV1,
   RunEventV1,
   TransitionV1,
   VerificationEvidenceV1,
@@ -68,6 +79,19 @@ export function createInitialState(
   };
 }
 
+function recordGet<T>(record: Record<string, T>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+function recordSet<T>(record: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(record, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
 function asObject(value: unknown, context: string): JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new TypeError(`${context} must be an object`);
@@ -78,6 +102,10 @@ function requireString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0)
     throw new TypeError(`${field} must be non-empty`);
   return value;
+}
+function requireStringList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) throw new TypeError(`${field} must be an array`);
+  return value.map((item, index) => requireString(item, `${field}[${index}]`));
 }
 
 function validateEvidence(
@@ -124,10 +152,13 @@ function reduceToolCompleted(
 ): void {
   const data = event.data;
   state.metrics.actions++;
-  const counts = state.toolCounts[data.toolName] ?? { ok: 0, error: 0 };
+  const counts = recordGet(state.toolCounts, data.toolName) ?? {
+    ok: 0,
+    error: 0,
+  };
   if (data.success) counts.ok++;
   else counts.error++;
-  state.toolCounts[data.toolName] = counts;
+  recordSet(state.toolCounts, data.toolName, counts);
   if (data.transition !== undefined) {
     const transition = validateTransition(data.transition);
     state.lastObservationRef = cloneJson(transition.observationAfter);
@@ -139,8 +170,11 @@ function reduceToolCompleted(
     }
   }
   if (!data.success)
-    state.failedToolIdentities[data.inputHash] =
-      (state.failedToolIdentities[data.inputHash] ?? 0) + 1;
+    recordSet(
+      state.failedToolIdentities,
+      data.inputHash,
+      (recordGet(state.failedToolIdentities, data.inputHash) ?? 0) + 1,
+    );
   else delete state.failedToolIdentities[data.inputHash];
 
   if (data.classification === "mutation" && data.success) {
@@ -213,8 +247,11 @@ function reduceHypothesis(
   ) as unknown as HypothesisV1;
   if (hypothesis.version !== 1 || hypothesis.kind !== "hypothesis")
     throw new TypeError("Invalid hypothesis contract");
-  state.hypotheses[requireString(hypothesis.id, "hypothesis.id")] =
-    cloneJson(hypothesis);
+  recordSet(
+    state.hypotheses,
+    requireString(hypothesis.id, "hypothesis.id"),
+    cloneJson(hypothesis),
+  );
 }
 
 function reduceBelief(
@@ -227,7 +264,11 @@ function reduceBelief(
   ) as unknown as BeliefClaimV1;
   if (claim.version !== 1 || claim.kind !== "belief_claim")
     throw new TypeError("Invalid belief claim contract");
-  state.beliefs.claims[requireString(claim.id, "claim.id")] = cloneJson(claim);
+  recordSet(
+    state.beliefs.claims,
+    requireString(claim.id, "claim.id"),
+    cloneJson(claim),
+  );
 }
 
 function reduceComponentMetadata(
@@ -236,24 +277,247 @@ function reduceComponentMetadata(
 ): void {
   const data = event.data;
   const revisionId = requireString(data.revisionId, "component.revisionId");
-  const componentKind = requireString(data.componentKind, "component.kind");
+  const rawComponentKind = requireString(data.componentKind, "component.kind");
+  let componentKind: ComponentKind;
+  switch (rawComponentKind) {
+    case "policy_overlay":
+    case "skill":
+    case "agent":
+    case "memory":
+      componentKind = rawComponentKind;
+      break;
+    default:
+      throw new TypeError("Invalid component kind");
+  }
   const name = requireString(data.name, "component.name");
-  const lifecycle = requireString(data.lifecycle, "component.lifecycle");
-  const key = `${componentKind}:${name}`;
+  const rawLifecycle = requireString(data.lifecycle, "component.lifecycle");
+  let lifecycle: ComponentStatus;
+  switch (rawLifecycle) {
+    case "proposed":
+    case "schema_valid":
+    case "policy_valid":
+    case "canary_valid":
+    case "active":
+    case "rejected":
+    case "rolled_back":
+      lifecycle = rawLifecycle;
+      break;
+    default:
+      throw new TypeError("Invalid component lifecycle");
+  }
+  const contentHash = requireString(data.contentHash, "component.contentHash");
+  if (!/^sha256:[0-9a-f]{64}$/u.test(contentHash))
+    throw new TypeError("component.contentHash must be a SHA-256 hash");
+  const rawProposedBy = requireString(data.proposedBy, "component.proposedBy");
+  let proposedBy: ComponentRevisionRefV1["proposedBy"];
+  switch (rawProposedBy) {
+    case "user":
+    case "model":
+    case "refiner":
+      proposedBy = rawProposedBy;
+      break;
+    default:
+      throw new TypeError("Invalid component proposer");
+  }
+  const parentRevisionId =
+    data.parentRevisionId === undefined
+      ? undefined
+      : requireString(data.parentRevisionId, "component.parentRevisionId");
+  const triggerEventId =
+    data.triggerEventId === undefined
+      ? undefined
+      : requireString(data.triggerEventId, "component.triggerEventId");
+  let metrics: ComponentMetricSnapshotV1 | undefined;
+  if (data.metrics !== undefined) {
+    const rawMetrics = asObject(data.metrics, "component.metrics");
+    metrics = {
+      actions: Number(rawMetrics.actions),
+      verificationFailures: Number(rawMetrics.verificationFailures),
+      regressions: Number(rawMetrics.regressions),
+      successfulVerifications: Number(rawMetrics.successfulVerifications),
+    };
+    if (
+      Object.values(metrics).some(
+        (value) => !Number.isSafeInteger(value) || value < 0,
+      )
+    )
+      throw new TypeError(
+        "component.metrics must contain non-negative integers",
+      );
+  }
   const reconstructed = data.reconstructed === true;
+  const reference: ComponentRevisionRefV1 = {
+    version: 1,
+    kind: "component_revision_ref",
+    revisionId,
+    componentKind,
+    name,
+    lifecycle,
+    contentHash,
+    validators: requireStringList(data.validators, "component.validators"),
+    validationErrors: requireStringList(
+      data.validationErrors,
+      "component.validationErrors",
+    ),
+    proposedBy,
+    ...(parentRevisionId ? { parentRevisionId } : {}),
+    ...(triggerEventId ? { triggerEventId } : {}),
+    ...(metrics ? { metrics } : {}),
+    ...(reconstructed ? { reconstructed: true } : {}),
+  };
+  recordSet(state.components, revisionId, cloneJson(reference));
+  const key = `${componentKind}:${name}`;
   if (lifecycle === "proposed" && !reconstructed)
     state.metrics.refinementProposals++;
   if (lifecycle === "active") {
-    state.activeComponents[key] = revisionId;
+    recordSet(state.activeComponents, key, revisionId);
     if (!reconstructed) state.metrics.acceptedRevisions++;
   }
   if (lifecycle === "rolled_back") {
     if (!reconstructed) state.metrics.rolledBackRevisions++;
-    if (state.activeComponents[key] === revisionId)
+    if (recordGet(state.activeComponents, key) === revisionId)
       delete state.activeComponents[key];
-    if (typeof data.parentRevisionId === "string")
-      state.activeComponents[key] = data.parentRevisionId;
+    if (parentRevisionId)
+      recordSet(state.activeComponents, key, parentRevisionId);
   }
+}
+
+function requireContentHash(value: unknown): string {
+  const hash = requireString(value, "executable model contentHash");
+  if (!/^sha256:[0-9a-f]{64}$/.test(hash))
+    throw new TypeError("executable model contentHash must be a SHA-256 hash");
+  return hash;
+}
+
+function validateReplayRecord(value: unknown): ReplayRecordV1 {
+  const replay = asObject(value, "replay record");
+  const keys = new Set([
+    "version",
+    "kind",
+    "id",
+    "modelId",
+    "fromState",
+    "action",
+    "predictedState",
+    "actualObservationHash",
+    "matched",
+    "occurredAt",
+  ]);
+  for (const key of Object.keys(replay))
+    if (!keys.has(key))
+      throw new TypeError(`replay record contains unknown field ${key}`);
+  if (replay.version !== 1 || replay.kind !== "replay_record")
+    throw new TypeError("Invalid replay record contract");
+  for (const field of [
+    "id",
+    "modelId",
+    "fromState",
+    "action",
+    "predictedState",
+    "occurredAt",
+  ] as const)
+    requireString(replay[field], `replay.${field}`);
+  requireContentHash(replay.actualObservationHash);
+  if (typeof replay.matched !== "boolean")
+    throw new TypeError("replay.matched must be boolean");
+  return cloneJson(replay) as unknown as ReplayRecordV1;
+}
+
+function storeExecutableModel(
+  state: HarnessStateV1,
+  model: StateGraphModelV1,
+): void {
+  recordSet(state.executableModels, model.id, model);
+}
+
+function reduceExecutableModel(
+  state: HarnessStateV1,
+  event: Extract<RunEventV1, { kind: "executable_model_changed" }>,
+): void {
+  const operation = requireString(
+    event.data.operation,
+    "executable model operation",
+  );
+  if (
+    operation !== "register" &&
+    operation !== "simplify" &&
+    operation !== "replay" &&
+    operation !== "reconstructed"
+  )
+    throw new TypeError(`Unsupported executable model operation ${operation}`);
+  const modelId = requireString(event.data.modelId, "executable model modelId");
+  const contentHash = requireContentHash(event.data.contentHash);
+  const model = validateStateGraphModel(event.data.model);
+  if (model.id !== modelId)
+    throw new TypeError("Executable model payload id does not match modelId");
+  if (hashJson(model) !== contentHash)
+    throw new TypeError("Executable model payload does not match contentHash");
+
+  if (operation === "register" || operation === "reconstructed") {
+    if (event.status !== "ok")
+      throw new TypeError(`${operation} executable model event must be ok`);
+    if (event.data.replay !== undefined)
+      throw new TypeError(`${operation} executable model event cannot replay`);
+    if (
+      recordGet(state.executableModels, modelId) !== undefined &&
+      !isDeepStrictEqual(recordGet(state.executableModels, modelId), model)
+    )
+      state.replayRecords = state.replayRecords.filter(
+        (record) => record.modelId !== modelId,
+      );
+    storeExecutableModel(state, model);
+    return;
+  }
+
+  const current = recordGet(state.executableModels, modelId);
+  if (current === undefined)
+    throw new TypeError(`Executable model ${modelId} does not exist`);
+
+  if (operation === "simplify") {
+    if (event.status !== "ok")
+      throw new TypeError("simplify executable model event must be ok");
+    if (event.data.replay !== undefined)
+      throw new TypeError("simplify executable model event cannot replay");
+    const expected = simplifyStateGraph(
+      current,
+      state.replayRecords,
+      model.updatedAt,
+    );
+    if (!isDeepStrictEqual(expected, model))
+      throw new TypeError(
+        "Simplified executable model is not the canonical transition",
+      );
+    storeExecutableModel(state, model);
+    return;
+  }
+
+  if (!isDeepStrictEqual(current, model))
+    throw new TypeError("Replay event changed the executable model");
+  const replay = validateReplayRecord(event.data.replay);
+  if (replay.modelId !== modelId)
+    throw new TypeError("Replay modelId does not match executable model");
+  if (!Object.hasOwn(model.states, replay.fromState))
+    throw new TypeError(`Replay references unknown state ${replay.fromState}`);
+  if (!Object.hasOwn(model.states, replay.predictedState))
+    throw new TypeError(
+      `Replay references unknown state ${replay.predictedState}`,
+    );
+  const transition = model.transitions.find(
+    (candidate) =>
+      candidate.from === replay.fromState && candidate.action === replay.action,
+  );
+  if (!transition || transition.to !== replay.predictedState)
+    throw new TypeError("Replay does not match an executable model transition");
+  const matched =
+    hashJson(model.states[replay.predictedState]) ===
+    replay.actualObservationHash;
+  if (replay.matched !== matched)
+    throw new TypeError("Replay matched result is inconsistent with the model");
+  if (event.status !== (matched ? "ok" : "error"))
+    throw new TypeError("Replay event status is inconsistent with its result");
+  if (state.replayRecords.some((record) => record.id === replay.id))
+    throw new TypeError(`Duplicate replay record ${replay.id}`);
+  state.replayRecords.push(replay);
 }
 
 export function reduceEvent(
@@ -314,6 +578,9 @@ export function reduceEvent(
       break;
     case "component_changed":
       reduceComponentMetadata(state, event);
+      break;
+    case "executable_model_changed":
+      reduceExecutableModel(state, event);
       break;
     case "refiner_started":
       state.refinerRuns++;

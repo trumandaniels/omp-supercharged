@@ -51,18 +51,13 @@ export interface ComponentRevisionEntryV1 {
   updatedAt: string;
 }
 
-const COMPONENT_KINDS: Record<ComponentKind, true> = {
-  policy_overlay: true,
-  skill: true,
-  agent: true,
-  memory: true,
-};
-const READ_ONLY_AGENT_TOOLS: Record<string, true> = {
-  read: true,
-  grep: true,
-  glob: true,
-  web_search: true,
-};
+const COMPONENT_KINDS = new Set<ComponentKind>([
+  "policy_overlay",
+  "skill",
+  "agent",
+  "memory",
+]);
+const READ_ONLY_AGENT_TOOLS = new Set(["read", "grep", "glob", "web_search"]);
 const MAX_COMPONENT_TEXT = 12_000;
 const MAX_PROJECTED_TEXT = 24_000;
 
@@ -71,10 +66,9 @@ function assertExactKeys(
   allowed: readonly string[],
   context: string,
 ): void {
-  const table: Record<string, true> = {};
-  for (const key of allowed) table[key] = true;
+  const allowedKeys = new Set(allowed);
   for (const key of Object.keys(value))
-    if (!table[key])
+    if (!allowedKeys.has(key))
       throw new TypeError(`${context} contains unknown field ${key}`);
 }
 
@@ -131,7 +125,7 @@ function validateAgentPayload(value: unknown): AgentPayloadV1 {
   const seen = new Set<string>();
   const tools = payload.tools.map((tool, index) => {
     assertNonEmptyString(tool, `agent.tools[${index}]`, 100);
-    if (!READ_ONLY_AGENT_TOOLS[tool])
+    if (!READ_ONLY_AGENT_TOOLS.has(tool))
       throw new TypeError(
         `Generated agent tool ${tool} is not in the read-only allowlist`,
       );
@@ -194,7 +188,7 @@ export function validateComponentPayload(
   kind: ComponentKind,
   value: unknown,
 ): ComponentPayloadV1 {
-  if (!COMPONENT_KINDS[kind]) throw new TypeError("Unknown component kind");
+  if (!COMPONENT_KINDS.has(kind)) throw new TypeError("Unknown component kind");
   if (kind === "policy_overlay") return validatePolicyPayload(value);
   if (kind === "skill") return validateSkillPayload(value);
   if (kind === "agent") return validateAgentPayload(value);
@@ -214,7 +208,7 @@ export function createComponentProposal(
     metrics?: ComponentMetricSnapshotV1;
   } = {},
 ): ComponentRevisionV1 {
-  if (!COMPONENT_KINDS[input.componentKind])
+  if (!COMPONENT_KINDS.has(input.componentKind))
     throw new TypeError("Unknown component kind");
   if (!/^[a-z][a-z0-9-]{1,63}$/.test(input.name))
     throw new TypeError(
@@ -275,6 +269,22 @@ function policyErrors(revision: ComponentRevisionV1): string[] {
   return [...new Set(errors)];
 }
 
+function projectedPayloadSize(
+  revision: ComponentRevisionV1,
+  activeRevisions: readonly ComponentRevisionV1[],
+): number {
+  return [
+    ...activeRevisions.filter(
+      (active) =>
+        componentKey(active.componentKind, active.name) !==
+        componentKey(revision.componentKind, revision.name),
+    ),
+    revision,
+  ]
+    .flatMap((item) => payloadText(item.payload))
+    .reduce((total, text) => total + text.length, 0);
+}
+
 export function validateComponentRevision(
   revision: ComponentRevisionV1,
   activeRevisions: readonly ComponentRevisionV1[],
@@ -313,17 +323,7 @@ export function validateComponentRevision(
   current.validators.push("text-policy-v1");
   current.updatedAt = now;
   transitions.push(cloneJson(current));
-  const projected = [
-    ...activeRevisions.filter(
-      (active) =>
-        componentKey(active.componentKind, active.name) !==
-        componentKey(current.componentKind, current.name),
-    ),
-    current,
-  ];
-  const projectedSize = projected
-    .flatMap((item) => payloadText(item.payload))
-    .reduce((total, text) => total + text.length, 0);
+  const projectedSize = projectedPayloadSize(current, activeRevisions);
   if (projectedSize > MAX_PROJECTED_TEXT) {
     current.status = "rejected";
     current.validationErrors.push(
@@ -336,6 +336,24 @@ export function validateComponentRevision(
   current.updatedAt = now;
   transitions.push(cloneJson(current));
   return transitions;
+}
+
+export function assertComponentRevisionCanActivate(
+  revision: ComponentRevisionV1,
+  activeRevisions: readonly ComponentRevisionV1[],
+): void {
+  if (revision.status !== "canary_valid")
+    throw new TypeError("Only canary-valid revisions can become active");
+  validateComponentPayload(revision.componentKind, revision.payload);
+  const violations = policyErrors(revision);
+  if (violations.length > 0)
+    throw new TypeError(
+      `Component no longer passes policy validation: ${violations.join("; ")}`,
+    );
+  if (projectedPayloadSize(revision, activeRevisions) > MAX_PROJECTED_TEXT)
+    throw new TypeError(
+      `Active projection would exceed ${MAX_PROJECTED_TEXT} characters`,
+    );
 }
 
 export function activateComponentRevision(

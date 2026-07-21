@@ -77,11 +77,14 @@ function validateEvidenceRefs(
   });
 }
 
-function requireClaim(state: BeliefStateV1, id: string): BeliefClaimV1 {
+function requireClaim(
+  state: Readonly<BeliefStateV1>,
+  id: string,
+): BeliefClaimV1 {
   assertNonEmptyString(id, "claim.id", 200);
-  const claim = state.claims[id];
-  if (!claim) throw new TypeError(`Unknown belief claim ${id}`);
-  return cloneJson(claim);
+  if (!Object.hasOwn(state.claims, id))
+    throw new TypeError(`Unknown belief claim ${id}`);
+  return cloneJson(state.claims[id]);
 }
 
 export function applyBeliefMutation(
@@ -93,11 +96,12 @@ export function applyBeliefMutation(
     referenceExists?: (reference: string) => boolean;
   } = {},
 ): BeliefClaimV1 {
-  const current = state as BeliefStateV1;
+  const current = state;
   const now = options.now ?? new Date().toISOString();
   const referenceExists = options.referenceExists ?? (() => false);
   if (input.operation === "upsert_claim") {
-    if (!AREAS[input.area]) throw new TypeError("Invalid belief area");
+    if (!Object.hasOwn(AREAS, input.area))
+      throw new TypeError("Invalid belief area");
     assertNonEmptyString(input.claim, "claim.claim", 16_000);
     assertFiniteUnitInterval(input.confidence, "claim.confidence");
     assertNonEmptyString(input.scope, "claim.scope", 2_000);
@@ -106,7 +110,9 @@ export function applyBeliefMutation(
         "claim.freshnessEpoch must be a non-negative integer",
       );
     const id = input.id?.trim() || (options.idFactory ?? newId)("belief");
-    const previous = current.claims[id];
+    const previous = Object.hasOwn(current.claims, id)
+      ? current.claims[id]
+      : undefined;
     return {
       version: 1,
       kind: "belief_claim",
@@ -149,7 +155,8 @@ export function applyBeliefMutation(
     target.push(input.evidenceRef);
     if (input.side === "contradicting") claim.status = "contradicted";
   } else {
-    if (!STATUSES[input.status]) throw new TypeError("Invalid belief status");
+    if (!Object.hasOwn(STATUSES, input.status))
+      throw new TypeError("Invalid belief status");
     assertNonEmptyString(input.reason, "status reason", 4_000);
     if (
       input.status === "active" &&
@@ -170,11 +177,10 @@ export function readBeliefs(
   state: Readonly<BeliefStateV1>,
   input: BeliefReadInput,
 ): BeliefClaimV1[] | BeliefClaimV1 {
-  if (input.operation === "get")
-    return requireClaim(state as BeliefStateV1, input.id);
-  if (input.area !== undefined && !AREAS[input.area])
+  if (input.operation === "get") return requireClaim(state, input.id);
+  if (input.area !== undefined && !Object.hasOwn(AREAS, input.area))
     throw new TypeError("Invalid belief area");
-  if (input.status !== undefined && !STATUSES[input.status])
+  if (input.status !== undefined && !Object.hasOwn(STATUSES, input.status))
     throw new TypeError("Invalid belief status");
   return Object.values(state.claims)
     .filter((claim) => input.area === undefined || claim.area === input.area)

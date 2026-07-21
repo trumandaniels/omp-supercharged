@@ -66,39 +66,96 @@ function firstPatternMatch(
   return -1;
 }
 
-export function classifyShellCommand(
-  command: string,
+interface ShellStructure {
+  segments: string[];
+  compound: boolean;
+  unsafeSyntax?: string;
+}
+
+function inspectShellStructure(command: string): ShellStructure {
+  const segments: string[] = [];
+  let segmentStart = 0;
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let compound = false;
+
+  const pushSegment = (end: number): boolean => {
+    const segment = command.slice(segmentStart, end).trim();
+    if (segment.length === 0) return false;
+    segments.push(segment);
+    return true;
+  };
+
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (character === "'" && quote !== '"') {
+      quote = quote === "'" ? undefined : "'";
+      continue;
+    }
+    if (character === '"' && quote !== "'") {
+      quote = quote === '"' ? undefined : '"';
+      continue;
+    }
+    if (quote === "'") continue;
+    if (character === "`")
+      return { segments, compound: true, unsafeSyntax: "backticks" };
+    if (character === "$" && command[index + 1] === "(")
+      return { segments, compound: true, unsafeSyntax: "command-substitution" };
+    if (quote === '"') continue;
+    if (character === ">" || character === "<")
+      return { segments, compound: true, unsafeSyntax: "redirection" };
+    if (character === "(" || character === ")")
+      return { segments, compound: true, unsafeSyntax: "shell-grouping" };
+    if (character === "&" && command[index + 1] !== "&")
+      return { segments, compound: true, unsafeSyntax: "backgrounding" };
+
+    const isSeparator =
+      character === ";" ||
+      character === "\n" ||
+      character === "\r" ||
+      character === "|" ||
+      (character === "&" && command[index + 1] === "&");
+    if (!isSeparator) continue;
+
+    compound = true;
+    if (!pushSegment(index))
+      return { segments, compound, unsafeSyntax: "ambiguous-sequencing" };
+    if (
+      (character === "|" && command[index + 1] === "|") ||
+      (character === "&" && command[index + 1] === "&") ||
+      (character === "\r" && command[index + 1] === "\n")
+    )
+      index++;
+    segmentStart = index + 1;
+  }
+
+  if (quote || escaped)
+    return { segments, compound: true, unsafeSyntax: "ambiguous-quoting" };
+  if (!pushSegment(command.length) && compound)
+    return { segments, compound, unsafeSyntax: "ambiguous-sequencing" };
+  return { segments, compound };
+}
+
+function classifySimpleShellCommand(
+  normalized: string,
   policy: ProjectPolicyV1,
 ): ClassificationResult {
-  const normalized = normalizeCommand(command);
-  const ignored = firstPatternMatch(
-    policy.verification.ignoreCommandPatterns,
-    normalized,
-  );
-  if (ignored >= 0)
-    return {
-      classification: "ignored",
-      classifier: `project-ignore:${ignored}`,
-      identityLabel: "shell",
-    };
-  const verification = firstPatternMatch(
-    policy.verification.commandPatterns,
-    normalized,
-  );
-  if (verification >= 0)
-    return {
-      classification: "verification",
-      classifier: `project-verification:${verification}`,
-      identityLabel: "shell",
-    };
-  const mutation = firstPatternMatch(
+  const projectMutation = firstPatternMatch(
     policy.verification.mutationCommandPatterns,
     normalized,
   );
-  if (mutation >= 0)
+  if (projectMutation >= 0)
     return {
       classification: "mutation",
-      classifier: `project-mutation:${mutation}`,
+      classifier: `project-mutation:${projectMutation}`,
       identityLabel: "shell",
     };
   for (const rule of BUILTIN_MUTATION_RULES) {
@@ -109,6 +166,17 @@ export function classifyShellCommand(
         identityLabel: "shell",
       };
   }
+
+  const projectVerification = firstPatternMatch(
+    policy.verification.commandPatterns,
+    normalized,
+  );
+  if (projectVerification >= 0)
+    return {
+      classification: "verification",
+      classifier: `project-verification:${projectVerification}`,
+      identityLabel: "shell",
+    };
   for (const rule of BUILTIN_VERIFICATION_RULES) {
     if (rule.regex.test(normalized))
       return {
@@ -128,6 +196,62 @@ export function classifyShellCommand(
   return {
     classification: "unknown",
     classifier: "builtin:unknown-shell",
+    identityLabel: "shell",
+  };
+}
+
+export function classifyShellCommand(
+  command: string,
+  policy: ProjectPolicyV1,
+): ClassificationResult {
+  const normalized = normalizeCommand(command);
+  const ignored = firstPatternMatch(
+    policy.verification.ignoreCommandPatterns,
+    normalized,
+  );
+  if (ignored >= 0)
+    return {
+      classification: "ignored",
+      classifier: `project-ignore:${ignored}`,
+      identityLabel: "shell",
+    };
+
+  const structure = inspectShellStructure(command.trim());
+  if (structure.unsafeSyntax)
+    return {
+      classification: "mutation",
+      classifier: `shell:${structure.unsafeSyntax}`,
+      identityLabel: "shell",
+    };
+  if (!structure.compound)
+    return classifySimpleShellCommand(normalized, policy);
+
+  const projectMutation = firstPatternMatch(
+    policy.verification.mutationCommandPatterns,
+    normalized,
+  );
+  if (projectMutation >= 0)
+    return {
+      classification: "mutation",
+      classifier: `project-mutation:${projectMutation}`,
+      identityLabel: "shell",
+    };
+  if (
+    structure.segments.length > 0 &&
+    structure.segments.every(
+      (segment) =>
+        classifySimpleShellCommand(normalizeCommand(segment), policy)
+          .classification === "verification",
+    )
+  )
+    return {
+      classification: "verification",
+      classifier: "shell:compound-verification",
+      identityLabel: "shell",
+    };
+  return {
+    classification: "mutation",
+    classifier: "shell:compound-non-verification",
     identityLabel: "shell",
   };
 }
@@ -187,7 +311,7 @@ function classifyLspAction(
     symbols: true,
     type_definition: true,
   };
-  if (readActions[action])
+  if (Object.hasOwn(readActions, action))
     return {
       classification: "read",
       classifier: `builtin:lsp-${action}`,
@@ -274,7 +398,7 @@ export function classifyToolCall(
       identityLabel: "write",
     };
   }
-  if (BUILTIN_READ_TOOLS[event.toolName]) {
+  if (Object.hasOwn(BUILTIN_READ_TOOLS, event.toolName)) {
     return {
       classification: "read",
       classifier: `builtin:${event.toolName}`,

@@ -12,13 +12,7 @@
       "tier": "weak"
     }
   ],
-  "conditions": [
-    "stock",
-    "ledger",
-    "state",
-    "refiner",
-    "executable_model"
-  ],
+  "conditions": ["stock", "ledger", "state", "refiner", "executable_model"],
   "repetitions": 1,
   "tasks": [
     {
@@ -27,11 +21,21 @@
       "prompt": "Fix mergeRanges in src/ranges.mjs so it merges overlapping inclusive ranges, preserves adjacent-but-disjoint ranges, rejects malformed ranges, and does not mutate its input. Use test.mjs as the executable contract. Complete the task only after verifying the result.",
       "verifier": {
         "command": "node",
-        "args": [
-          "--test",
-          "test.mjs"
-        ],
-        "timeoutMs": 30000
+        "args": ["--test", "test.mjs"],
+        "timeoutMs": 30000,
+        "immutablePaths": ["test.mjs"]
+      },
+      "maxRunSeconds": 300
+    },
+    {
+      "id": "retry-contract",
+      "workspace": "../fixtures/retry-contract",
+      "prompt": "Fix retry in src/retry.mjs so it validates its public contract, uses one-based attempt numbers, executes at most maxAttempts calls, obeys shouldRetry, returns the eventual value, and throws the last error when attempts are exhausted. Use test.mjs as the executable contract. Complete the task only after verifying the result.",
+      "verifier": {
+        "command": "node",
+        "args": ["--test", "test.mjs"],
+        "timeoutMs": 30000,
+        "immutablePaths": ["test.mjs"]
       },
       "maxRunSeconds": 300
     }

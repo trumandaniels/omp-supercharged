@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "route-ambiguous-mechanism",
+      "must_route": true,
+      "signals": [
+        "two plausible mechanisms",
+        "different next steps",
+        "falsification test"
+      ]
+    },
+    {
+      "id": "skip-straightforward-contract",
+      "must_route": false,
+      "signals": [
+        "reproduced defect",
+        "one clear contract",
+        "routine verification"
+      ]
+    }
+  ]
+}
