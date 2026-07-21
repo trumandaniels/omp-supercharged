@@ -5,7 +5,7 @@
 `omp-supercharged` is a portable, Git-versioned extension layer for OMP. It is designed to make agent runs more inspectable, bounded, and trustworthy by turning strong harness-engineering ideas into reusable tools, policies, and run artifacts.
 
 > [!IMPORTANT]
-> **Project status: pre-alpha.** This repository currently defines the product, architecture, and intended public interface. The installable extension package is under development; follow the roadmap before relying on it in production.
+> **Project status: `0.1.0` pre-alpha.** The source-linkable extension, runtime ledger, freshness gate, typed state tools, adaptive component controls, and focused tests are implemented and smoke-tested with OMP `17.0.5`. The adaptive layers remain opt-in, and this is not yet a production security boundary.
 
 ## Why this exists
 
@@ -21,15 +21,19 @@ The goal is not a longer system prompt or a permanent swarm. It is a small set o
 
 ## What it adds
 
-The first release is designed around five capabilities.
+The default runtime and its opt-in adaptive layers provide these capabilities:
 
-| Capability | What it does | Why it matters |
-|---|---|---|
-| **Append-only run ledger** | Records versioned session, tool, retry, mutation, verification, and stop events with hashes and artifact references. | A result can be inspected and reconstructed after the model context is gone. |
-| **Verification freshness gate** | Tracks successful mutations and requires newer verification evidence—or an explicit, recorded waiver—before completion. | “Done” becomes an observable state transition, not a sentence. |
-| **Hypothesis portfolio** | Stores competing mechanisms, supporting and opposing evidence, predictions, falsification tests, confidence, and status. | Ambiguous work branches on evidence rather than rhetoric or majority vote. |
-| **Bounded execution policy** | Supplies conservative OMP settings for concurrency, request budgets, runtime, approval, and workspace isolation. | Expensive or risky loops stop at explicit limits. |
-| **Run reports** | Exports model, prompt, tool, artifact, verification, budget, and stop metadata in a stable manifest. | Performance and failures can be compared across runs instead of remembered anecdotally. |
+| Capability                        | What it does                                                                                                                     | Why it matters                                                                                                            |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **Append-only run ledger**        | Records versioned session, tool, retry, mutation, verification, lineage, component, and stop events with hashes.                 | A result can be inspected and reconstructed after the model context is gone.                                              |
+| **Verification freshness gate**   | Tracks successful mutations and requires newer verification evidence—or an explicit, recorded waiver—before completion.          | “Done” becomes an observable state transition, not a sentence.                                                            |
+| **Hypothesis portfolio**          | Stores competing mechanisms, evidence, predictions, falsification tests, confidence, and status.                                 | Ambiguous work branches on evidence rather than rhetoric or majority vote.                                                |
+| **Evidence-linked belief state**  | Maintains compact world, goal, action, finding, question, plan, and cross-task claims with confidence and evidence references.   | Working state stays attributable instead of becoming an ungrounded summary.                                               |
+| **Staged adaptive components**    | Validates, content-addresses, canaries, activates, rejects, and rolls back policy, skill, read-only agent, and memory revisions. | A model may propose improvements, but deterministic checks and user-only controls decide adoption.                        |
+| **Bounded Refiner**               | Optionally analyzes evidence-linked trajectories after configured triggers and proposes component revisions.                     | Adaptation uses explicit budgets, trigger provenance, and rollback metrics rather than rewriting the live prompt blindly. |
+| **Declarative executable models** | Reconstructs, predicts, replays, simplifies, and verifies bounded state graphs without executing generated code.                 | Deterministic domains can reject theories that fail exact replay.                                                         |
+| **Bounded execution policy**      | Supplies an optional OMP overlay for concurrency, request budgets, runtime, approval, and workspace isolation.                   | Expensive or risky loops stop at explicit limits.                                                                         |
+| **Run manifests**                 | Exports model, prompt, tool, verification, policy, evaluation, and adaptive metrics under a strict schema.                       | Performance and failures can be compared across runs instead of remembered anecdotally.                                   |
 
 ## How it works
 
@@ -74,9 +78,6 @@ omp --version
 
 ### Install from source
 
-> [!NOTE]
-> These commands become usable when the first extension package lands. During pre-alpha, the repository contains the product specification and roadmap only.
-
 Clone this repository into any stable directory, enter it, and link it into OMP:
 
 ```bash
@@ -115,7 +116,7 @@ cd /path/to/your-project
 omp
 ```
 
-The intended default workflow is automatic:
+The default workflow is automatic:
 
 1. The run ledger opens when the session starts.
 2. Successful write operations advance the mutation epoch.
@@ -123,15 +124,82 @@ The intended default workflow is automatic:
 4. If the session attempts to stop with newer unverified mutations, the gate requests one bounded verification pass.
 5. Completion records the evidence, budget outcome, and stop reason in the run manifest.
 
-The planned interactive commands are:
+The interactive commands are:
 
-| Command | Purpose |
-|---|---|
-| `/harness-status` | Show the current mutation, verification, hypothesis, and budget state. |
-| `/harness-export` | Write a stable run manifest and display its path. |
-| `/harness-waive <reason>` | Explicitly waive unavailable verification and preserve the reason in the ledger. |
+| Command                                              | Purpose                                                                                                   |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `/harness-status`                                    | Show mutation freshness, stop state, hypotheses, beliefs, components, models, metrics, and policy errors. |
+| `/harness-export`                                    | Rebuild and atomically write the validated run manifest.                                                  |
+| `/harness-waive <reason>`                            | User-only waiver for unavailable verification at the current mutation epoch.                              |
+| `/harness-refine [reason]`                           | Run one bounded Refiner pass when the Refiner condition is enabled.                                       |
+| `/harness-components`                                | List staged and active adaptive component revisions.                                                      |
+| `/harness-component-accept <revision-id>`            | Activate a canary-valid revision.                                                                         |
+| `/harness-component-reject <revision-id> <reason>`   | Reject a staged revision.                                                                                 |
+| `/harness-component-rollback <revision-id> <reason>` | Roll back an active revision.                                                                             |
 
-The model-facing hypothesis tool is intended for genuinely ambiguous work, not every task. A typical request can stay natural:
+The model-callable tools are `hypothesis_portfolio`, `belief_state`, `harness_component`, and `executable_model`. Feature-gated tools return an explicit error unless their evaluation condition is enabled. Activation, rejection, rollback, and verification waivers remain user-only.
+
+### Project policy
+
+The extension reads an optional `.omp/supercharged.json` from the launch project. Missing files use conservative built-in defaults; malformed files are rejected atomically and recorded as policy errors.
+
+Evaluation conditions are cumulative:
+
+| Condition          | Adds                                                                                                               |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `stock`            | Stock OMP under the same process overlay; the external evaluator records results, but no extension or completion gate loads.      |
+| `ledger`           | Verification freshness, manifests, and the hypothesis portfolio. This is the default.                              |
+| `state`            | Evidence-linked belief state and prompt projection.                                                                |
+| `refiner`          | Staged adaptive components and active-component projection. A model Refiner also requires `refiner.enabled: true`. |
+| `executable_model` | Declarative state-graph registration and replay verification.                                                      |
+
+Example opt-in Refiner policy:
+
+```json
+{
+  "version": 1,
+  "evaluation": {
+    "condition": "refiner",
+    "taskId": "project-refiner-canary"
+  },
+  "refiner": {
+    "enabled": true,
+    "autoActivate": false,
+    "triggers": [
+      "verification_failure",
+      "repeated_tool_failure",
+      "belief_contradiction"
+    ],
+    "maxRuns": 2
+  }
+}
+```
+
+`autoActivate` defaults to `false`. Even when enabled, only revisions that pass schema validation, policy checks, and replay/canary checks can activate automatically.
+
+### Optional hardening overlay
+
+Run OMP with the repository-owned overlay for a process-local safety profile:
+
+```bash
+omp --config "$OMP_SUPERCHARGED_HOME/config/hardened.yml"
+```
+
+The overlay sets parent-session approval to `write`, limits tool timeouts and subagent concurrency/runtime/request budgets, and selects `task.isolation.mode: auto`. Subagents still have separate headless approval behavior. Workspace isolation protects edits; it does not remove network access or credentials and is not hostile-code containment. OMP configuration arrays replace rather than merge across layers; inspect any future array-valued overlay changes before use.
+
+### Comparative evaluation
+
+The checked-in release gate runs every task/model pair through the same five cumulative conditions. Condition order rotates across pairs to reduce order bias; every run receives a fresh copy of the fixture workspace and the same deterministic verifier.
+
+```bash
+sfw-npm run evaluate -- evaluation/suites/release-gate.json
+```
+
+The runner rejects incomplete suites, duplicate cells, unsafe bare package-manager verifiers, and malformed persisted results. It writes each result atomically, resumes only schema-valid cells with the same spec hash, and then emits `report.json` under `$XDG_STATE_HOME/omp-supercharged/evaluations/<suite>/<spec>/` (or `~/.local/state` when `XDG_STATE_HOME` is unset).
+
+Reports contain hashes and aggregate metrics, not captured model prose or tool bodies. `primaryInputTokens`, `primaryOutputTokens`, and `primaryCostUsd` cover the primary OMP response stream; `modelRequests` also includes extension-internal Refiner calls. `verificationDefectsCaught` is the count of failed qualifying verification attempts observed by the harness, not a proof that each failure was a distinct product defect.
+
+The hypothesis tool is for genuinely ambiguous work, not every task. A typical request can stay natural:
 
 > Track the competing root-cause hypotheses, identify the cheapest falsification test, then proceed with the best-supported explanation.
 
@@ -156,6 +224,20 @@ A run report distinguishes provider errors, tool failures, verification failures
 ### OMP remains updateable
 
 This project does not patch OMP source, overwrite bundled prompts, or replace the `omp` executable. It loads through the extension interface and keeps its configuration in a separate repository. OMP API changes may still require a compatibility release, but there is no fork to merge during routine updates.
+
+`omp-supercharged` never invokes, wraps, or replaces `omp update`. After an OMP update, check the public extension contract before the next consequential run:
+
+```bash
+omp plugin doctor
+```
+
+If a future OMP release changes that contract, disable only this external plugin while OMP remains usable:
+
+```bash
+omp plugin disable omp-supercharged
+# Re-enable after installing a compatible omp-supercharged revision:
+omp plugin enable omp-supercharged
+```
 
 ## The tweet that started it
 
@@ -237,7 +319,7 @@ This project takes inspiration from the mechanisms that transfer across domains,
 
 OMP extensions execute as trusted code inside the OMP process. Install only revisions you trust.
 
-The planned defaults are intentionally conservative:
+The defaults are intentionally conservative:
 
 - metadata and hashes are recorded by default, not unrestricted raw secrets;
 - runtime artifacts live outside the Git repository;
@@ -248,29 +330,35 @@ The planned defaults are intentionally conservative:
 
 ## Roadmap
 
-- [ ] Package manifest and minimal extension entry point
-- [ ] Versioned append-only event ledger
-- [ ] Mutation and verification freshness tracking
-- [ ] `/harness-status`, `/harness-export`, and `/harness-waive`
-- [ ] Typed hypothesis portfolio tool
-- [ ] Conservative `config/hardened.yml` overlay
-- [ ] Content-addressed artifact storage and run manifests
-- [ ] Focused compatibility and failure-recovery tests
-- [ ] Optional container-backed executor for untrusted candidate code
-- [ ] Paired evaluations against unextended OMP workflows
+Implemented in `0.1.0`:
+
+- [x] Package manifest and minimal extension entry point
+- [x] Versioned append-only event ledger with strict recovery
+- [x] Mutation and verification freshness tracking
+- [x] Status, export, and user-only waiver controls
+- [x] Typed hypothesis portfolio and evidence-linked belief state
+- [x] Conservative `config/hardened.yml` overlay
+- [x] Content-addressed adaptive components and executable state models
+- [x] Strict run manifests and focused compatibility/failure-recovery tests
+
+Next gates:
+
+- [ ] Paired, task-level ablations against stock OMP workflows
+- [ ] Canary evidence that the automatic Refiner improves outcomes without a model-capability floor regression
+- [ ] Optional container-backed executor before any generated code is treated as untrusted
 
 The project will not add a memory database, role hierarchy, or elaborate planner until traces demonstrate a concrete need.
 
 ## Sources and attribution
 
-| Source | Contribution to this project |
-|---|---|
-| [Alex Fazio's harness-engineering post][fazio-tweet] | The prompt to study strong ARC harnesses for first-principles, transferable design. |
-| [Oh My Pi][omp] and its [extension architecture][omp-extensions] | The host runtime and update-safe extension surface. |
-| [ARCgentica, pinned revision][arcgentica] | Independent attempts, recursive decomposition, executable transformations, verification, and complete run artifacts. |
-| [RGB-Agent, pinned revision][rgb-agent] | Durable logs, programmatic perception, short action batches, event-driven replanning, and constrained execution. |
-| [Recursive Language Models][rlm] | The external-context and recursive-selection model. |
-| [ARC-AGI-2][arc-agi-2] and [ARC-AGI-3][arc-agi-3] | The benchmark regimes needed to interpret the source harnesses accurately. |
+| Source                                                           | Contribution to this project                                                                                         |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| [Alex Fazio's harness-engineering post][fazio-tweet]             | The prompt to study strong ARC harnesses for first-principles, transferable design.                                  |
+| [Oh My Pi][omp] and its [extension architecture][omp-extensions] | The host runtime and update-safe extension surface.                                                                  |
+| [ARCgentica, pinned revision][arcgentica]                        | Independent attempts, recursive decomposition, executable transformations, verification, and complete run artifacts. |
+| [RGB-Agent, pinned revision][rgb-agent]                          | Durable logs, programmatic perception, short action batches, event-driven replanning, and constrained execution.     |
+| [Recursive Language Models][rlm]                                 | The external-context and recursive-selection model.                                                                  |
+| [ARC-AGI-2][arc-agi-2] and [ARC-AGI-3][arc-agi-3]                | The benchmark regimes needed to interpret the source harnesses accurately.                                           |
 
 ## License
 
@@ -292,10 +380,17 @@ Licensed under the [Apache License 2.0](LICENSE).
 [arc-agi-3]: https://arcprize.org/arc-agi/3
 
 [^omp-extensions]: OMP's extension guide documents event handlers, typed tools, slash commands, and runtime hooks through `ExtensionAPI`.
+
 [^arcgentica-readme]: ARCgentica documents two independent attempts, recursive subagents, executable Python transformations, and published run artifacts in its [README][arcgentica-readme].
+
 [^arcgentica-agent]: The pinned [`arc_agent/agent.py`][arcgentica-agent] implements the root REPL and recursive agent capability.
+
 [^arcgentica-solve]: The pinned [`solve.py`][arcgentica-solve] executes candidate transformation code and evaluates it against task examples.
+
 [^rgb-readme]: RGB-Agent summarizes its Read/Grep/Python analyzer, JSON plan, action queue, and container architecture in its [README][rgb-readme].
+
 [^rgb-runner]: The pinned [`environment/runner.py`][rgb-runner] implements the online observe, analyze, queue, act, and log loop.
+
 [^rgb-queue]: The pinned [`agent/action_queue.py`][rgb-queue] implements batched action execution and queue invalidation behavior.
+
 [^rlm]: Zhang, Kraska, and Khattab describe prompts as external environments that models inspect, decompose, and recursively process in [Recursive Language Models][rlm].

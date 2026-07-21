@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "kind": "evaluation_suite",
+  "id": "release-gate",
+  "models": [
+    {
+      "id": "openai-codex/gpt-5.6-sol",
+      "tier": "strong"
+    },
+    {
+      "id": "openai-codex/gpt-5.6-luna",
+      "tier": "weak"
+    }
+  ],
+  "conditions": [
+    "stock",
+    "ledger",
+    "state",
+    "refiner",
+    "executable_model"
+  ],
+  "repetitions": 1,
+  "tasks": [
+    {
+      "id": "range-merge-contract",
+      "workspace": "../fixtures/range-merge",
+      "prompt": "Fix mergeRanges in src/ranges.mjs so it merges overlapping inclusive ranges, preserves adjacent-but-disjoint ranges, rejects malformed ranges, and does not mutate its input. Use test.mjs as the executable contract. Complete the task only after verifying the result.",
+      "verifier": {
+        "command": "node",
+        "args": [
+          "--test",
+          "test.mjs"
+        ],
+        "timeoutMs": 30000
+      },
+      "maxRunSeconds": 300
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+tools:
+  approvalMode: write
+  maxTimeout: 900
+
+task:
+  maxConcurrency: 4
+  maxRecursionDepth: 2
+  softRequestBudget: 30
+  maxRuntimeMs: 1200000
+  isolation:
+    mode: auto

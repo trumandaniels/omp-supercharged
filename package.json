@@ -1,0 +1,21 @@
+{
+  "name": "omp-supercharged",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Evidence, verification, and adaptive control for Oh My Pi",
+  "license": "Apache-2.0",
+  "engines": {
+    "bun": ">=1.3.14",
+    "node": ">=22.6.0"
+  },
+  "omp": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test --test-concurrency=1 tests/*.test.ts",
+    "evaluate": "node --experimental-strip-types src/evaluate-cli.ts"
+  }
+}
