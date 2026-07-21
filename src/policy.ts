@@ -35,7 +35,7 @@ export const DEFAULT_PROJECT_POLICY: ProjectPolicyV1 = {
     maxStopContinuations: 1,
   },
   refiner: {
-    enabled: false,
+    enabled: true,
     autoActivate: false,
     model: "@smol",
     thinkingLevel: "low",
@@ -47,7 +47,7 @@ export const DEFAULT_PROJECT_POLICY: ProjectPolicyV1 = {
     stagnationActionLimit: 20,
     repeatedFailureLimit: 3,
   },
-  evaluation: { condition: "ledger" },
+  evaluation: { condition: "executable_model" },
 };
 
 export interface LoadedProjectPolicy {

@@ -1,168 +1,82 @@
 # omp-supercharged
 
-**Evidence, verification, and adaptive control for [Oh My Pi][omp]—without forking it.**
+> if you’re into harness engineering, i strongly recommend looking into arc agi winning harnesses. they clearly illustrate what works from first principles, what is bs, and why a lot of current harness design is overfitted to benchmarkmaxx
+>
+> — [Alex Fazio][fazio-tweet]
 
-`omp-supercharged` is a portable, Git-versioned extension layer for OMP. It is designed to make agent runs more inspectable, bounded, and trustworthy by turning strong harness-engineering ideas into reusable tools, policies, and run artifacts.
+ARC-AGI is the toughest public test of general reasoning in the world right now. Across [ARC-AGI-2][arc-agi-2] and [ARC-AGI-3][arc-agi-3], a model faces unfamiliar tasks, strict interfaces, and exact scoring. A harness cannot bluff its way through that.
 
-> [!IMPORTANT]
-> **Project status: `0.1.0` is production-ready for trusted, source-linked OMP deployments.** The default ledger, freshness gate, typed state tools, manifests, and evaluator are implemented, hardened, and release-gated with OMP `17.0.5`. Adaptive refinement and executable-model controls remain opt-in; extensions execute in-process, so this is not a hostile-code, network, credential, or secrets sandbox.
+`omp-supercharged` is built from the best ideas found in those harnesses. Grid solvers and game prompts stay behind. The transferred discipline preserves the trajectory, discards stale evidence, tests competing explanations, and requires every harness change to earn its way into the live system.
 
-## Why this exists
+Give OMP a task and it can already move fast. `omp-supercharged` makes “done” harder to fake. Every run leaves a versioned ledger, every successful mutation recorded by the harness expires old verification, and every small state model can be checked against exact observations. Stock OMP gets ARC-grade harness discipline without replacing its agent substrate.
 
-OMP already provides a strong agent substrate: structured tools, hash-anchored edits, LSP integration, executable Python and JavaScript, subagents, isolation modes, retries, and persistent sessions. `omp-supercharged` focuses on the control plane around those capabilities:
+## Install
 
-- make state and evidence durable instead of relying on one model context;
-- require fresh verification after successful mutations;
-- represent uncertainty explicitly when multiple explanations remain plausible;
-- spend subagent calls and runtime within deliberate budgets;
-- leave behind a run record that can be inspected without trusting the final prose summary.
-
-The goal is not a longer system prompt or a permanent swarm. It is a small set of runtime guarantees that make OMP easier to trust on consequential work.
-
-## What it adds
-
-The default runtime and its opt-in adaptive layers provide these capabilities:
-
-| Capability                        | What it does                                                                                                                     | Why it matters                                                                                                            |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| **Append-only run ledger**        | Records versioned session, tool, retry, mutation, verification, lineage, component, and stop events with hashes.                 | A result can be inspected and reconstructed after the model context is gone.                                              |
-| **Verification freshness gate**   | Tracks successful mutations and requires newer verification evidence—or an explicit, recorded waiver—before completion.          | “Done” becomes an observable state transition, not a sentence.                                                            |
-| **Hypothesis portfolio**          | Stores competing mechanisms, evidence, predictions, falsification tests, confidence, and status.                                 | Ambiguous work branches on evidence rather than rhetoric or majority vote.                                                |
-| **Evidence-linked belief state**  | Maintains compact world, goal, action, finding, question, plan, and cross-task claims with confidence and evidence references.   | Working state stays attributable instead of becoming an ungrounded summary.                                               |
-| **Staged adaptive components**    | Validates, content-addresses, canaries, activates, rejects, and rolls back policy, skill, read-only agent, and memory revisions. | A model may propose improvements, but deterministic checks and user-only controls decide adoption.                        |
-| **Bounded Refiner**               | Optionally analyzes evidence-linked trajectories after configured triggers and proposes component revisions.                     | Adaptation uses explicit budgets, trigger provenance, and rollback metrics rather than rewriting the live prompt blindly. |
-| **Declarative executable models** | Reconstructs, predicts, replays, simplifies, and verifies bounded state graphs without executing generated code.                 | Deterministic domains can reject theories that fail exact replay.                                                         |
-| **Bounded execution policy**      | Supplies an optional OMP overlay for concurrency, request budgets, runtime, approval, and workspace isolation.                   | Expensive or risky loops stop at explicit limits.                                                                         |
-| **Run manifests**                 | Exports model, prompt, tool, verification, policy, evaluation, and adaptive metrics under a strict schema.                       | Performance and failures can be compared across runs instead of remembered anecdotally.                                   |
-
-## How it works
-
-```mermaid
-flowchart LR
-    U[User task] --> O[OMP]
-    O --> M[Model and tools]
-    M --> E[Extension events]
-    E --> L[(Append-only ledger)]
-    E --> V[Verification gate]
-    M <--> H[Hypothesis portfolio]
-    V -->|fresh evidence| D[Complete]
-    V -->|stale or missing evidence| R[Continue or waive]
-    R --> M
-    L --> X[Run report and replay metadata]
-```
-
-OMP remains responsible for models, tools, sessions, and updates. `omp-supercharged` uses OMP's documented extension surface to register event handlers, typed tools, slash commands, and policies.[^omp-extensions]
-
-The extension source lives in this repository. Runtime state does not:
-
-```text
-~/.local/state/omp-supercharged/
-  runs/<run-id>/events.jsonl
-  runs/<run-id>/manifest.json
-
-~/.local/share/omp-supercharged/
-  artifacts/sha256/<content-hash>
-```
-
-This separation keeps the source repository clean and makes run data independently removable.
-
-## Installation
-
-### Prerequisite
-
-Install a current version of [Oh My Pi][omp] using its official installation instructions, then confirm that the CLI is available:
+Install a current [OMP][omp] release, clone this repository to a stable path, then let OMP handle the plugin:
 
 ```bash
 omp --version
-```
-
-### Install from source
-
-Clone this repository into any stable directory, enter it, and link it into OMP:
-
-```bash
 cd /absolute/path/to/omp-supercharged
-omp plugin link "$PWD"
+omp plugin install "$PWD"
 omp plugin doctor
 ```
 
-`plugin link` creates a user-level link to the working tree. The repository remains the source of truth, so pulling a new revision updates the linked extension without copying files into OMP's installation directory.
+A local install is a source link. Pull the repository and the installed plugin updates with it. `omp plugin link "$PWD"` does the same thing.
 
-The package also exposes the on-demand `evidence-harness` skill. It routes genuinely ambiguous, consequential investigations into the hypothesis portfolio and explicitly avoids routine implementation work.
-
-### Try it without a persistent link
-
-An explicit extension path keeps the enhanced runtime opt-in:
+Check that OMP sees it:
 
 ```bash
-export OMP_SUPERCHARGED_HOME=/absolute/path/to/omp-supercharged
-omp --extension "$OMP_SUPERCHARGED_HOME"
+omp plugin list
 ```
 
-Load the versioned hardening overlay for the same process:
+Start OMP from any project as usual:
 
 ```bash
-omp \
-  --extension "$OMP_SUPERCHARGED_HOME" \
-  --config "$OMP_SUPERCHARGED_HOME/config/hardened.yml"
-```
-
-Normal `omp` remains available as an unmodified fallback, and `omp update` continues to operate on the stock OMP installation.
-
-## Usage
-
-After a persistent link, start OMP normally from the project you want to work on:
-
-```bash
-cd /path/to/your-project
+cd /path/to/project
 omp
 ```
 
-The default workflow is automatic:
+For a one-off run, skip the install:
 
-1. The run ledger opens when the session starts.
-2. Successful write operations advance the mutation epoch.
-3. Successful checks record verification evidence against that epoch.
-4. If the session attempts to stop with newer unverified mutations, the gate requests one bounded verification pass.
-5. Completion records the evidence, budget outcome, and stop reason in the run manifest.
+```bash
+omp --extension /absolute/path/to/omp-supercharged
+```
 
-The interactive commands are:
+## The tools
 
-| Command                                              | Purpose                                                                                                   |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `/harness-status`                                    | Show mutation freshness, stop state, hypotheses, beliefs, components, models, metrics, and policy errors. |
-| `/harness-export`                                    | Rebuild and atomically write the validated run manifest.                                                  |
-| `/harness-waive <reason>`                            | User-only waiver for unavailable verification at the current mutation epoch.                              |
-| `/harness-refine [reason]`                           | Run one bounded Refiner pass when the Refiner condition is enabled.                                       |
-| `/harness-components`                                | List staged and active adaptive component revisions.                                                      |
-| `/harness-component-accept <revision-id>`            | Activate a canary-valid revision.                                                                         |
-| `/harness-component-reject <revision-id> <reason>`   | Reject a staged revision.                                                                                 |
-| `/harness-component-rollback <revision-id> <reason>` | Roll back an active revision.                                                                             |
+| Tool                   | What it does                                                                       |
+| ---------------------- | ---------------------------------------------------------------------------------- |
+| `hypothesis_portfolio` | Keeps competing explanations, evidence, predictions, and falsification tests.      |
+| `belief_state`         | Carries useful claims, plans, and open questions across turns with their evidence. |
+| `harness_component`    | Stages versioned changes to policies, skills, read-only agents, and memory.        |
+| `executable_model`     | Builds small state graphs and checks them through simulation and exact replay.     |
 
-The model-callable tools are `hypothesis_portfolio`, `belief_state`, `harness_component`, and `executable_model`. Feature-gated tools return an explicit error unless their evaluation condition is enabled. Manual activation, rejection, rollback, and verification waivers are slash-command-only; the sole activation exception is policy-authorized `autoActivate`, which remains off by default.
+The checked-in default policy enables all four tools. Its relevant settings are below.
 
-### Project policy
+```json
+{
+  "evaluation": {
+    "condition": "executable_model"
+  },
+  "refiner": {
+    "enabled": true,
+    "autoActivate": false,
+    "triggers": []
+  }
+}
+```
 
-The extension reads an optional `.omp/supercharged.json` from the launch project. Missing files use conservative built-in defaults; malformed files are rejected atomically and recorded as policy errors.
+`executable_model` includes the lower feature levels, so the ledger, belief state, adaptive components, and state models are active together. By default, the Refiner runs only through explicit `/harness-refine` calls. Automatic triggers and `autoActivate` remain off, preventing unrequested model spend or live harness changes.
 
-Evaluation conditions are cumulative:
+### Change the project policy
 
-| Condition          | Adds                                                                                                                         |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `stock`            | Stock OMP under the same process overlay; the external evaluator records results, but no extension or completion gate loads. |
-| `ledger`           | Verification freshness, manifests, and the hypothesis portfolio. This is the default.                                        |
-| `state`            | Evidence-linked belief state and prompt projection.                                                                          |
-| `refiner`          | Staged adaptive components and active-component projection. A model Refiner also requires `refiner.enabled: true`.           |
-| `executable_model` | Declarative state-graph registration and replay verification.                                                                |
-
-Example opt-in Refiner policy:
+Use `.omp/supercharged.json` in the current project to narrow features or configure automatic Refiner runs. This example enables three triggers while keeping activation user-controlled:
 
 ```json
 {
   "version": 1,
   "evaluation": {
-    "condition": "refiner",
-    "taskId": "project-refiner-canary"
+    "condition": "executable_model"
   },
   "refiner": {
     "enabled": true,
@@ -177,258 +91,157 @@ Example opt-in Refiner policy:
 }
 ```
 
-`autoActivate` defaults to `false`. Even when enabled, only revisions that pass schema validation, policy checks, and replay/canary checks can activate automatically.
+Each level includes the one before it.
 
-### Optional hardening overlay
+| Condition          | What is active                                              |
+| ------------------ | ----------------------------------------------------------- |
+| `ledger`           | Ledger, freshness gate, manifests, and hypotheses           |
+| `state`            | Everything in `ledger`, plus beliefs                        |
+| `refiner`          | Everything in `state`, plus adaptive components             |
+| `executable_model` | Everything in `refiner`, plus state models. This is default |
 
-Run OMP with the repository-owned overlay for a process-local safety profile:
+A malformed policy is rejected as a whole and shows up in `/harness-status`.
 
-```bash
-omp --config "$OMP_SUPERCHARGED_HOME/config/hardened.yml"
+## Commands
+
+| Command                                              | Action                                                    |
+| ---------------------------------------------------- | --------------------------------------------------------- |
+| `/harness-status`                                    | Show verification, state, components, models, and policy. |
+| `/harness-export`                                    | Rebuild and write the run manifest.                       |
+| `/harness-waive <reason>`                            | Waive verification for the current mutation epoch.        |
+| `/harness-refine [reason]`                           | Run one bounded Refiner pass.                             |
+| `/harness-components`                                | List component revisions.                                 |
+| `/harness-component-accept <revision-id>`            | Activate a canary-valid revision.                         |
+| `/harness-component-reject <revision-id> <reason>`   | Reject a staged revision.                                 |
+| `/harness-component-rollback <revision-id> <reason>` | Roll back an active revision.                             |
+
+## What happens during a run
+
+The extension opens a ledger when the session starts. A successful mutation advances the mutation epoch, and any earlier test result stops counting. Verification has to happen after that mutation.
+
+If the agent tries to stop while the run is stale, it gets one bounded continuation to check the work. Shutdown writes a manifest that can be rebuilt from the ledger.
+
+### Data flow
+
+```mermaid
+flowchart TD
+    User["User task"] --> OMP["Stock OMP"]
+    OMP --> Calls["Tool calls and results"]
+    Calls --> Classifier["Conservative classifier"]
+    Classifier -->|classified event| Ledger[("Append-only event ledger")]
+    Ledger --> Reducer["Deterministic reducer"]
+    Reducer --> State["Run state: freshness, beliefs, hypotheses, components, models"]
+
+    State -->|stop request| Gate{"Latest mutation covered?"}
+    Gate -->|stale; continuation available| Continue["One bounded verification continuation"]
+    Continue --> OMP
+    Gate -->|stale; ceiling reached| Block["Completion blocked"]
+    Gate -->|verified or waived| Finish["Final response"]
+
+    Ledger -->|export or shutdown| Manifest["Reconstructible manifest"]
+    OMP --> StateTools["Hypothesis and belief tools"]
+    StateTools --> Ledger
+    OMP --> ArtifactTools["Component and executable-model tools"]
+    ArtifactTools --> Ledger
+    ArtifactTools --> Artifacts[("Content-addressed artifacts")]
+
+    State --> Snapshot["Bounded Refiner snapshot"]
+    Snapshot --> Refiner["Optional Refiner"]
+    Refiner --> Revisions["Staged component revisions"]
+    Revisions --> Checks["Schema, policy, and canary checks"]
+    Checks --> Review["User accept, reject, or rollback"]
+    Review -->|decision event| Ledger
+    Review -->|accept| OMP
 ```
 
-The overlay sets parent-session approval to `write`, limits tool timeouts and subagent concurrency/runtime/request budgets, and selects `task.isolation.mode: auto`. Subagents still have separate headless approval behavior. Workspace isolation protects edits; it does not remove network access or credentials and is not hostile-code containment. OMP configuration arrays replace rather than merge across layers; inspect any future array-valued overlay changes before use.
+The files live outside the repository:
 
-### Comparative evaluation
+```text
+~/.local/state/omp-supercharged/runs/<run-id>/events.jsonl
+~/.local/state/omp-supercharged/runs/<run-id>/manifest.json
+~/.local/share/omp-supercharged/artifacts/sha256/<content-hash>
+```
 
-The checked-in release gate runs every task/model pair through the same five cumulative conditions. Condition order rotates across pairs to reduce order bias; every run receives a fresh copy of the fixture workspace and the same deterministic verifier.
-Model slices pin an explicit thinking level instead of inheriting ambient role defaults; the checked-in gate uses `high` for the strong tier and `medium` for the weak tier to measure a lower-cost control path without the weak tier's observed high-thinking stalls or low-thinking accuracy loss.
-Each task's verifier must declare a nonempty `immutablePaths` list of safe relative files (such as `test.mjs`); the runner requires those files to remain regular, non-symlink files with byte-identical contents from the pristine workspace through agent completion.
+By default, the ledger stores metadata and hashes rather than raw prompts, environment values, or tool bodies.
+
+## Tighten the runtime
+
+The bundled hardening overlay adds write approval, a 900-second tool timeout, four concurrent subagents, recursion depth two, a 30-request soft budget, a 20-minute task limit, and automatic workspace isolation.
 
 ```bash
+omp --config /absolute/path/to/omp-supercharged/config/hardened.yml
+```
+
+## Tested against stock OMP
+
+The `0.1.0` release gate gave stock and enhanced OMP the same tasks and immutable verifiers. Two 20-cell runs produced 38/40 passes, including one 20/20 run. The only misses were two 300-second weak-model timeouts. Provider and harness failures were both zero. Every enhanced condition matched or beat stock task success.
+
+The current extension is tested with OMP `17.0.5`.
+
+Run the checks:
+
+```bash
+sfw-npm test
 sfw-npm run evaluate -- evaluation/suites/release-gate.json
 ```
 
-A source-bound release run completed 20/20 cells across four task/model pairs with zero provider, harness, or task failures and zero completion-gate interventions. A second run with the same execution identity completed 18/20: two weak-tier calls reached the 300-second task limit, one in stock and one in `executable_model`; all other cells passed, and neither run had provider or harness failures. Aggregate task success was 38/40, with every non-stock condition matching or exceeding stock success. Evidence identity: execution `sha256:da1dff3bc6968c5c18a82cf106806e08b7b1c51b9705303e09aac8c1c525c8f6`, harness `sha256:b55799d433a2858cd2cbd4434fa7887b3081af5633b0276cf282f9270137bcc7`, suite `sha256:64d2b79affeafc5a8e8ac0b0e586945980af95bf06f49dd000152311874ed1ce`.
+Each evaluation cell gets a fresh workspace and a verifier the agent cannot edit. Interrupted cells can resume, and provider outages are kept separate from task failures. The implementation and release details are in [`docs/CURRENTPLAN.md`](docs/CURRENTPLAN.md).
 
-The runner rejects incomplete suites, duplicate cells, unsafe bare package-manager verifiers, workspace symlinks, and malformed persisted results. It snapshots the harness and every fixture before execution, isolates installed-plugin discovery, hashes the suite, harness, workspace, hardening overlay, and observed OMP version into one execution identity, writes each cell atomically, and resumes only exact identity matches. The final `report.json` lives under `$XDG_STATE_HOME/omp-supercharged/evaluations/<suite>/<execution>/` (or `~/.local/state` when `XDG_STATE_HOME` is unset).
-
-A cell succeeds only when OMP emits a non-error provider response, the process protocol remains well formed, the immutable verifier passes, and every non-stock manifest reconstructs exactly from its ledger. Failed cells are classified as `provider`, `harness`, or `task`; the CLI still writes the resumable report, prints each failure count, and exits nonzero so infrastructure outages cannot masquerade as model or task failures.
-
-Reports contain hashes and aggregate metrics, not captured model prose or tool bodies. Each cell records its configured `modelThinkingLevel`; `elapsedMs` uses a monotonic clock and is not distorted by wall-clock adjustments. `primaryInputTokens`, `primaryOutputTokens`, and `primaryCostUsd` cover the primary OMP response stream; `modelRequests` also includes extension-internal Refiner calls. `verificationDefectsCaught` is the count of failed qualifying verification attempts observed by the harness, not a proof that each failure was a distinct product defect. `regressionsAfterRefinement` counts component revisions rolled back after activation. `completePairs` counts task/model/replicate groups with all five conditions; `weakModelPairs` is the subset assigned to the configured weak tier.
-
-The hypothesis tool is for genuinely ambiguous work, not every task. A typical request can stay natural:
-
-> Track the competing root-cause hypotheses, identify the cheapest falsification test, then proceed with the best-supported explanation.
-
-## Why it helps
-
-### Evidence survives the context window
-
-Model context is working memory, not an audit log. An append-only ledger preserves exact lineage while derived manifests and indexes remain rebuildable views.
-
-### Verification becomes a runtime invariant
-
-Prompts can ask an agent to test its work, but prompts do not enforce state transitions. The freshness gate checks whether verification happened after the latest successful mutation and prevents accidental “verified before the final edit” completions.
-
-### Parallelism becomes selective
-
-More agents are not automatically better. `omp-supercharged` is designed to keep straightforward work single-threaded and reserve independent candidates or critics for high-impact uncertainty.
-
-### Failure becomes inspectable
-
-A run report distinguishes provider errors, tool failures, verification failures, policy blocks, explicit waivers, and budget stops. That makes failures actionable and enables comparisons across models, prompts, and policies.
-
-### OMP remains updateable
-
-This project does not patch OMP source, overwrite bundled prompts, or replace the `omp` executable. It loads through the extension interface and keeps its configuration in a separate repository. OMP API changes may still require a compatibility release, but there is no fork to merge during routine updates.
-
-`omp-supercharged` never invokes, wraps, or replaces `omp update`. After an OMP update, check the public extension contract before the next consequential run:
+After an OMP update, run:
 
 ```bash
 omp plugin doctor
 ```
 
-If a future OMP release changes that contract, disable only this external plugin while OMP remains usable:
+## Boundaries
 
-```bash
-omp plugin disable omp-supercharged
-# Re-enable after installing a compatible omp-supercharged revision:
-omp plugin enable omp-supercharged
-```
+This plugin runs inside OMP, so only trusted code should be installed. Workspace isolation keeps edits separate. It does not cut network access or hide credentials and secrets.
 
-## The tweet that started it
+- The completion gate catches stale verification. It cannot prove arbitrary software correct.
+- Executable models are declarative state graphs. They do not run generated simulator code.
+- Component revisions do not activate themselves by default.
+- Hostile or generated code still belongs in a separate container-backed executor.
 
-The spark was [Alex Fazio's post about harness engineering][fazio-tweet]. He argued that ARC-AGI harnesses are unusually useful artifacts because they expose what works from first principles, what is empty ceremony, and what may be overfitted to a benchmark.
+Unknown shell commands stay unclassified instead of being guessed into the mutation record. Consequential work still needs a real external check.
 
-That observation led to the question behind this repository:
+## What `omp-supercharged` takes from the ARC harnesses
 
-> What would it look like to extract the transferable control-plane ideas from strong ARC harnesses and make them available for everyday coding, research, and automation in OMP?
+Grid solvers, game APIs, and ARC scoring are excluded from the transfer. The surviving mechanisms are added one layer at a time. The evaluator can run stock OMP and the cumulative `ledger`, `state`, `refiner`, and `executable_model` conditions on the same coding task.
 
-`omp-supercharged` is the answer in extension form. It does not attempt to turn OMP into an ARC solver. It ports the general mechanisms: externalized state, executable computation, selective branching, typed boundaries, closed-loop verification, budgets, and replayable evidence.
+| Source                                                                                        | What transferred                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [ARCgentica][arcgentica]                                                                      | Independent candidate solutions, deterministic checks against examples, and complete run artifacts became competing hypotheses tied to evidence plus reconstructible ledgers and manifests. Stock OMP already handles recursion, so no additional recursive agent loop was added.                                                                  |
+| [RGB-Agent][rgb-agent]                                                                        | Its append-only external state became the JSONL ledger and reducers. Its evidence-first workflow shows up in beliefs and hypotheses that carry references. Its queue invalidation rule became the same discipline behind the freshness gate: change the work and old verification stops counting.                                                  |
+| [Duck Harness][duck-harness]                                                                  | Duck showed how far a small, bounded shell around a capable model can go. OMP stays the agent substrate here; the plugin supplies the control layer. The optional overlay caps requests, recursion, runtime, and concurrency, while the evaluator reports model calls, actions, elapsed time, and storage.                                         |
+| [Executable World Models][executable-world-models] and its [baseline][ewm-baseline]           | Fixed interfaces for reconstruction, simulation, planning, simplification, and replay became the `executable_model` tool. Models are declarative, content-hashed, and checked against exact observations. Evaluation cells use fresh workspaces and protected verifiers. Generated simulator code remains out of scope.                            |
+| [Continual Harness][continual-harness-paper] and its [implementation][continual-harness-repo] | Trajectory-driven improvements to prompts, agents, skills, and memory became the Refiner. It reads a bounded run snapshot and stages versioned policy, skill, read-only agent, or memory revisions. Schema, policy, and canary checks come before user acceptance; rejection and rollback are built in. Automatic activation stays off by default. |
+| [Recursive Language Models][rlm]                                                              | Long context becomes something to inspect, not a blob to stuff into one prompt. Ledgers, artifacts, beliefs, and hypotheses therefore live outside the model context, and the Refiner receives a bounded reconstruction. RLM informs the context design; it does not add a hidden RLM runtime.                                                     |
+| [ARC-AGI-2][arc-agi-2] and [ARC-AGI-3][arc-agi-3]                                             | Their evaluation discipline became the release gate. The same task, model, workspace fixture, and immutable verifier run through every condition, with provider, harness, and task failures counted separately.                                                                                                                                    |
 
-## Projects that inspired the design
-
-### ARCgentica: executable candidates and sparse recursive decomposition
-
-[ARCgentica][arcgentica] targets the static ARC-AGI-2 regime. Its published harness runs independent attempts, lets a root agent delegate recursively when useful, synthesizes Python transformations, executes them against examples, and persists configuration, candidate programs, usage, timing, results, and per-agent logs.[^arcgentica-readme][^arcgentica-agent][^arcgentica-solve]
-
-The transferable lesson is not “spawn ten agents.” The stronger pattern is:
-
-- let one root reasoner handle straightforward cases;
-- branch when decomposition, ambiguity, or adversarial review justifies the cost;
-- turn a hypothesis into an executable artifact;
-- let deterministic execution—not persuasive prose—decide whether the artifact survives;
-- preserve the trace needed to understand the result.
-
-`omp-supercharged` translates that into selective hypothesis branching, typed session state, verifier freshness, and durable run manifests.
-
-### RGB-Agent: the log is memory, and plans are short
-
-[RGB-Agent][rgb-agent] targets the interactive ARC-AGI-3 regime. Its analyzer reads a durable game log with Read, Grep, and Python, emits a JSON action plan, and lets an action queue execute steps without another model call. The analyzer runs again when the queue empties or the score changes.[^rgb-readme][^rgb-runner][^rgb-queue]
-
-The transferable lessons are:
-
-- keep raw observations and actions outside the prompt;
-- retrieve and compute over the relevant evidence programmatically;
-- separate planning from execution with a typed boundary;
-- use short, receding-horizon plans;
-- replan when observed state diverges from expectations;
-- keep the execution environment narrower than the model's reasoning environment.
-
-`omp-supercharged` applies these ideas to code changes and tool use: append-only evidence, explicit plan state, bounded execution, and verification after observed mutations.
-
-### Duck Harness: keep the loop small
-
-[Tufa Labs' Duck Harness][duck-harness] and its [released code][duck-harness-repo] expose observations as Python variables in a compact REPL, supply pre-built inspection/action helpers, update the variables after each environment action, and evict old messages to bound context. Its published comparison with the executable-world-model agent found similar GPT-5.4 game coverage at roughly an order-of-magnitude lower per-game cost, evidence that harness shape can dominate operating cost even when model capability limits which tasks are solvable.
-
-`omp-supercharged` keeps that restraint: stock OMP retains tool execution, while the extension adds compact attributed state and bounded loops instead of another general-purpose orchestrator.
-
-### Executable World Models: theories must replay
-
-[Executable World Models][executable-world-models] maintains a fixed-interface Python simulator, checks it against prior observations, simplifies it toward smaller abstractions, and plans through it before acting. The accompanying [baseline repository][ewm-baseline] starts each playthrough from a clean workspace and publishes run artifacts; its authors explicitly treat strong public-game results as public-set saturation, not held-out generalization.
-
-This project adopts exact replay, simplification, and fresh workspaces, but uses bounded declarative state graphs rather than executing model-generated simulator code inside OMP.
-
-### Continual Harness: adaptation needs a transaction boundary
-
-[Continual Harness][continual-harness-paper] ([project site][continual-harness-site]) alternates environment action with a Refiner that can revise prompt, subagent, skill, and memory stores from accumulated trajectories without resetting the run. Its [ARC-AGI-3 implementation][continual-harness-repo] persists isolated store snapshots and trajectories per game.
-
-`omp-supercharged` makes that adaptation opt-in and transactional: revisions are content-addressed, schema-checked, canaried, activated separately, and rolled back on measured regression. The Refiner may propose; it cannot silently rewrite the live harness.
-
-### Recursive Language Models: context as an external environment
-
-The [Recursive Language Models paper][rlm] formalizes a related principle: treat long context as an external environment that the model can inspect programmatically, decompose, and recurse over selectively rather than forcing everything into one prompt.[^rlm]
-
-That informs the repository's memory model: canonical events and artifacts first; summaries, indexes, and selected context second.
-
-### A necessary benchmark caveat
-
-ARCgentica addresses static ARC-AGI-2 program induction. RGB-Agent, Duck Harness, Executable World Models, and Continual Harness address interactive ARC-AGI-3 control. Results across these regimes, model versions, public sets, and compute budgets are not directly comparable.
-
-This project transfers cross-domain mechanisms, not ARC-specific grids, prompts, scoring rules, action spaces, or leaderboard claims.
-
-### Stock OMP gap analysis
-
-Stock OMP already supplies the difficult substrate—typed tools, hash-anchored edits, LSP, executable runtimes, persistent sessions, retries, advisors, and recursive task agents. The missing layer was not another agent loop; it was durable control state around that substrate.
-
-| Transferable mechanism                    | Source examples                         | Stock OMP baseline                                                                                                           | `omp-supercharged` decision                                                                                                              |
-| ----------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| External trajectory and replayable state  | RGB-Agent, Continual Harness            | Persistent transcripts exist, but not a strict domain event ledger with rebuildable reducers.                                | Add a versioned append-only ledger, manifests, lineage, and content-addressed artifacts.                                                 |
-| Post-mutation verification freshness      | Executable World Models, RGB-Agent      | Tests can run, but completion is not tied to evidence newer than the last mutation.                                          | Track mutation epochs and continue or block completion until fresh evidence or an attributed waiver exists.                              |
-| Competing explanations                    | ARCgentica, Executable World Models     | Advisors and task agents can disagree in prose, but no typed evidence/falsification state survives.                          | Add hypothesis and belief tools; branch only when predictions differ.                                                                    |
-| Executable theory replay                  | Executable World Models                 | Python and JavaScript are available, but there is no persistent fixed-interface theory with exact trajectory replay.         | Add bounded declarative state graphs; do not execute generated simulator code in-process.                                                |
-| Online harness refinement                 | Continual Harness                       | Memory and advisor facilities adapt context, but do not transactionally revise policy, skills, agents, or memory components. | Stage content-addressed proposals, canary them, separate activation, and roll back measured regressions.                                 |
-| Compact context and measured cost         | Duck Harness, Recursive Language Models | Compaction, memory, Read/Grep, and eval already exist; attributed domain state and paired ablations do not.                  | Project only active evidence-linked state and ship a resumable, identity-hashed evaluator.                                               |
-| Recursive decomposition                   | ARCgentica                              | OMP already has recursive task agents, depth limits, isolation modes, and request budgets.                                   | Reuse them; add conservative process limits, not a permanent role hierarchy.                                                             |
-| Batched action queues                     | RGB-Agent                               | Todos and task dispatch exist, but there is no general action queue with invalidation semantics.                             | Defer it: current traces do not justify a second planner beside OMP's own control loop.                                                  |
-| Clean-room execution and leakage auditing | Executable World Models                 | Workspace isolation protects edits, not credentials, network access, or the host.                                            | Snapshot and hash evaluation inputs and isolate plugin discovery; require a container executor before claiming hostile-code containment. |
-
-## Design principles
-
-1. **Evidence is canonical.** Summaries and indexes are derived, attributable, and rebuildable.
-2. **The model proposes; the harness verifies.** Acceptance belongs to deterministic checks wherever possible.
-3. **Mutation invalidates prior verification.** Evidence must be fresh relative to the state it supports.
-4. **Uncertainty earns compute.** Branch only when alternatives make materially different predictions.
-5. **Plans are data, not prose.** Missing or invalid fields reject the plan instead of inventing defaults.
-6. **Every loop has a budget.** Tokens, requests, time, actions, depth, and concurrency need finite limits.
-7. **Raw capability is not isolation.** Workspace separation, process containment, network policy, and secret handling are different controls.
-8. **OMP stays stock.** Extend public surfaces; do not carry a private fork.
-
-## Non-goals
-
-`omp-supercharged` is not:
-
-- a replacement for OMP;
-- a universal system prompt;
-- an always-on multi-agent organization;
-- a vector database disguised as memory;
-- a claim that verification can prove arbitrary software correct;
-- a security sandbox merely because it can intercept tool calls;
-- an ARC benchmark submission.
-
-## Security and privacy
-
-OMP extensions execute as trusted code inside the OMP process. Install only revisions you trust.
-
-The defaults are intentionally conservative:
-
-- metadata and hashes are recorded by default, not unrestricted raw secrets;
-- runtime artifacts live outside the Git repository;
-- failed or malformed plans do not partially execute;
-- waivers are explicit and attributable;
-- generated or hostile code requires a separate container-backed executor before it can be described as sandboxed;
-- OMP workspace isolation is treated as edit isolation, not as a complete security boundary.
-
-Operational limits are explicit:
-
-- the completion gate is bounded: after the configured continuation ceiling it records the unresolved stale state and permits termination rather than trapping the session indefinitely;
-- unknown or failed shell commands are not treated as definitive mutations, so consequential workflows should use typed mutation tools or project-classified commands and verify final state externally;
-- model, provider, OMP, prompt, and policy identities are recorded from reported values and content hashes; they are audit identities, not binary or provider attestations.
-
-## Roadmap
-
-Implemented in `0.1.0`:
-
-- [x] Package manifest and minimal extension entry point
-- [x] Versioned append-only event ledger with strict recovery
-- [x] Mutation and verification freshness tracking
-- [x] Status, export, and user-only waiver controls
-- [x] Typed hypothesis portfolio and evidence-linked belief state
-- [x] Conservative `config/hardened.yml` overlay
-- [x] Content-addressed adaptive components and executable state models
-- [x] Strict run manifests and focused compatibility/failure-recovery tests
-- [x] Source-bound `evidence-harness` skill with deterministic routing, provenance, and mutation checks
-- [x] Immutable, resumable five-condition ablation runner with a final 20-cell paired release gate
-
-Optional follow-on gates:
-
-- [ ] Canary evidence that the automatic Refiner improves outcomes without a model-capability floor regression
-- [ ] Optional container-backed executor before any generated code is treated as untrusted
-
-The project will not add a memory database, role hierarchy, or elaborate planner until traces demonstrate a concrete need.
-
-## Sources and attribution
-
-| Source                                                           | Contribution to this project                                                                                         |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| [Alex Fazio's harness-engineering post][fazio-tweet]             | The prompt to study strong ARC harnesses for first-principles, transferable design.                                  |
-| [Oh My Pi][omp] and its [extension architecture][omp-extensions] | The host runtime and update-safe extension surface.                                                                  |
-| [ARCgentica, pinned revision][arcgentica]                        | Independent attempts, recursive decomposition, executable transformations, verification, and complete run artifacts. |
-| [RGB-Agent, pinned revision][rgb-agent]                          | Durable logs, programmatic perception, short action batches, event-driven replanning, and constrained execution.     |
-| [Duck Harness][duck-harness]                                     | A minimal Python REPL, compact context, helper-mediated action loop, and explicit cost comparison.                   |
-| [Executable World Models][executable-world-models]               | Fixed-interface world models, exact replay, simplification, clean workspaces, and leakage auditing.                  |
-| [Continual Harness][continual-harness-paper]                     | Reset-free trajectory-driven refinement of prompts, agents, skills, and memory.                                      |
-| [Recursive Language Models][rlm]                                 | The external-context and recursive-selection model.                                                                  |
-| [ARC-AGI-2][arc-agi-2] and [ARC-AGI-3][arc-agi-3]                | The benchmark regimes needed to interpret the source harnesses accurately.                                           |
+ARC winners are optimized for a benchmark, so transfer was the filter. ARC exposed the mechanics under pressure; coding tasks decided what stayed.
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE)
 
-[fazio-tweet]: https://x.com/alxfazio/status/2073091833530392614
+## Sources
+
+- [Alex Fazio's harness-engineering tweet][fazio-tweet]
+- [Oh My Pi][omp] and its [extension API][omp-extensions]
+- [ARCgentica][arcgentica]
+- [RGB-Agent][rgb-agent]
+- [Duck Harness][duck-harness]
+- [Executable World Models][executable-world-models] and its [baseline implementation][ewm-baseline]
+- [Continual Harness][continual-harness-paper], its [project site][continual-harness-site], and its [ARC-AGI-3 implementation][continual-harness-repo]
+- [Recursive Language Models][rlm]
+- [ARC-AGI-2][arc-agi-2] and [ARC-AGI-3][arc-agi-3]
+
 [omp]: https://github.com/can1357/oh-my-pi
+[fazio-tweet]: https://x.com/alxfazio/status/2073091833530392614
 [omp-extensions]: https://github.com/can1357/oh-my-pi/blob/main/docs/extensions.md
 [arcgentica]: https://github.com/symbolica-ai/arcgentica/tree/bbba64d047e7e043619e50e336dd75c60f234d00
-[arcgentica-readme]: https://github.com/symbolica-ai/arcgentica/blob/bbba64d047e7e043619e50e336dd75c60f234d00/README.md
-[arcgentica-agent]: https://github.com/symbolica-ai/arcgentica/blob/bbba64d047e7e043619e50e336dd75c60f234d00/arc_agent/agent.py
-[arcgentica-solve]: https://github.com/symbolica-ai/arcgentica/blob/bbba64d047e7e043619e50e336dd75c60f234d00/solve.py
 [rgb-agent]: https://github.com/alexisfox7/RGB-Agent/tree/c0a685cfd7152418195df8cd014bdc3a8ec3a4d4
-[rgb-readme]: https://github.com/alexisfox7/RGB-Agent/blob/c0a685cfd7152418195df8cd014bdc3a8ec3a4d4/README.md
-[rgb-runner]: https://github.com/alexisfox7/RGB-Agent/blob/c0a685cfd7152418195df8cd014bdc3a8ec3a4d4/rgb_agent/environment/runner.py
-[rgb-queue]: https://github.com/alexisfox7/RGB-Agent/blob/c0a685cfd7152418195df8cd014bdc3a8ec3a4d4/rgb_agent/agent/action_queue.py
 [duck-harness]: https://tufalabs.ai/research/duck-harness/
-[duck-harness-repo]: https://github.com/Tufalabs/duck-harness
 [executable-world-models]: https://arxiv.org/abs/2605.05138
 [ewm-baseline]: https://github.com/astroseger/arc-3-agents-baseline1
 [continual-harness-paper]: https://arxiv.org/abs/2605.09998
@@ -437,19 +250,3 @@ Licensed under the [Apache License 2.0](LICENSE).
 [rlm]: https://arxiv.org/abs/2512.24601
 [arc-agi-2]: https://github.com/arcprize/ARC-AGI-2
 [arc-agi-3]: https://arcprize.org/arc-agi/3
-
-[^omp-extensions]: OMP's extension guide documents event handlers, typed tools, slash commands, and runtime hooks through `ExtensionAPI`.
-
-[^arcgentica-readme]: ARCgentica documents two independent attempts, recursive subagents, executable Python transformations, and published run artifacts in its [README][arcgentica-readme].
-
-[^arcgentica-agent]: The pinned [`arc_agent/agent.py`][arcgentica-agent] implements the root REPL and recursive agent capability.
-
-[^arcgentica-solve]: The pinned [`solve.py`][arcgentica-solve] executes candidate transformation code and evaluates it against task examples.
-
-[^rgb-readme]: RGB-Agent summarizes its Read/Grep/Python analyzer, JSON plan, action queue, and container architecture in its [README][rgb-readme].
-
-[^rgb-runner]: The pinned [`environment/runner.py`][rgb-runner] implements the online observe, analyze, queue, act, and log loop.
-
-[^rgb-queue]: The pinned [`agent/action_queue.py`][rgb-queue] implements batched action execution and queue invalidation behavior.
-
-[^rlm]: Zhang, Kraska, and Khattab describe prompts as external environments that models inspect, decompose, and recursively process in [Recursive Language Models][rlm].

@@ -267,6 +267,20 @@ test("runtime records mutation freshness, verification, redacted metadata, and a
   ]);
   assert.ok(api.commands.has("harness-status"));
   await api.emit("session_start", { type: "session_start" }, context);
+  for (const toolName of [
+    "hypothesis_portfolio",
+    "belief_state",
+    "harness_component",
+    "executable_model",
+  ]) {
+    const result = await executeTool(
+      api,
+      toolName,
+      { operation: "list" },
+      context,
+    );
+    assert.notEqual(result.isError, true, `${toolName} is enabled by default`);
+  }
 
   const secretInput = {
     path: "src/secret.ts",

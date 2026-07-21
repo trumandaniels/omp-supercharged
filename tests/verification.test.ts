@@ -262,6 +262,14 @@ test("compound shell commands cannot hide mutations behind verification", () => 
   );
 });
 
+test("default policy enables every model tool without automatic activation", () => {
+  const parsed = parseProjectPolicy({ version: 1 });
+  assert.equal(parsed.evaluation.condition, "executable_model");
+  assert.equal(parsed.refiner.enabled, true);
+  assert.equal(parsed.refiner.autoActivate, false);
+  assert.deepEqual(parsed.refiner.triggers, []);
+});
+
 test("policy parsing rejects partial malformed configuration atomically", () => {
   const parsed = parseProjectPolicy({
     version: 1,
@@ -323,7 +331,7 @@ test("freshness transitions, bounded stop decisions, and epoch-scoped waivers re
       cwdHash: hashJson({ cwd: "/workspace" }),
       policyHash: hashJson(DEFAULT_PROJECT_POLICY),
       systemPromptHash: hashJson(["system"]),
-      evaluationCondition: "ledger",
+      evaluationCondition: DEFAULT_PROJECT_POLICY.evaluation.condition,
     },
     { sessionRef: "session-verification" },
   );
@@ -461,7 +469,7 @@ test("freshness transitions, bounded stop decisions, and epoch-scoped waivers re
   assert.equal(manifest.stopReason, "test complete");
   assert.doesNotThrow(() => validateManifest(manifest, events));
   const changedPolicy = structuredClone(DEFAULT_PROJECT_POLICY);
-  changedPolicy.refiner.enabled = true;
+  changedPolicy.refiner.enabled = false;
   assert.throws(
     () => deriveManifest(events, hashJson(events), changedPolicy),
     /latest policy recorded/u,
