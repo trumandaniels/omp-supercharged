@@ -5,7 +5,7 @@
 `omp-supercharged` is a portable, Git-versioned extension layer for OMP. It is designed to make agent runs more inspectable, bounded, and trustworthy by turning strong harness-engineering ideas into reusable tools, policies, and run artifacts.
 
 > [!IMPORTANT]
-> **Project status: `0.1.0` pre-alpha.** The source-linkable extension, runtime ledger, freshness gate, typed state tools, adaptive component controls, and focused tests are implemented and smoke-tested with OMP `17.0.5`. The adaptive layers remain opt-in, and this is not yet a production security boundary.
+> **Project status: `0.1.0` is production-ready for trusted, source-linked OMP deployments.** The default ledger, freshness gate, typed state tools, manifests, and evaluator are implemented, hardened, and release-gated with OMP `17.0.5`. Adaptive refinement and executable-model controls remain opt-in; extensions execute in-process, so this is not a hostile-code, network, credential, or secrets sandbox.
 
 ## Why this exists
 
@@ -199,11 +199,13 @@ Each task's verifier must declare a nonempty `immutablePaths` list of safe relat
 sfw-npm run evaluate -- evaluation/suites/release-gate.json
 ```
 
+A source-bound release run completed 20/20 cells across four task/model pairs with zero provider, harness, or task failures and zero completion-gate interventions. A second run with the same execution identity completed 18/20: two weak-tier calls reached the 300-second task limit, one in stock and one in `executable_model`; all other cells passed, and neither run had provider or harness failures. Aggregate task success was 38/40, with every non-stock condition matching or exceeding stock success. Evidence identity: execution `sha256:da1dff3bc6968c5c18a82cf106806e08b7b1c51b9705303e09aac8c1c525c8f6`, harness `sha256:b55799d433a2858cd2cbd4434fa7887b3081af5633b0276cf282f9270137bcc7`, suite `sha256:64d2b79affeafc5a8e8ac0b0e586945980af95bf06f49dd000152311874ed1ce`.
+
 The runner rejects incomplete suites, duplicate cells, unsafe bare package-manager verifiers, workspace symlinks, and malformed persisted results. It snapshots the harness and every fixture before execution, isolates installed-plugin discovery, hashes the suite, harness, workspace, hardening overlay, and observed OMP version into one execution identity, writes each cell atomically, and resumes only exact identity matches. The final `report.json` lives under `$XDG_STATE_HOME/omp-supercharged/evaluations/<suite>/<execution>/` (or `~/.local/state` when `XDG_STATE_HOME` is unset).
 
 A cell succeeds only when OMP emits a non-error provider response, the process protocol remains well formed, the immutable verifier passes, and every non-stock manifest reconstructs exactly from its ledger. Failed cells are classified as `provider`, `harness`, or `task`; the CLI still writes the resumable report, prints each failure count, and exits nonzero so infrastructure outages cannot masquerade as model or task failures.
 
-Reports contain hashes and aggregate metrics, not captured model prose or tool bodies. Each cell records its configured `modelThinkingLevel`. `primaryInputTokens`, `primaryOutputTokens`, and `primaryCostUsd` cover the primary OMP response stream; `modelRequests` also includes extension-internal Refiner calls. `verificationDefectsCaught` is the count of failed qualifying verification attempts observed by the harness, not a proof that each failure was a distinct product defect. `regressionsAfterRefinement` counts component revisions rolled back after activation. `completePairs` counts task/model/replicate groups with all five conditions; `weakModelPairs` is the subset assigned to the configured weak tier.
+Reports contain hashes and aggregate metrics, not captured model prose or tool bodies. Each cell records its configured `modelThinkingLevel`; `elapsedMs` uses a monotonic clock and is not distorted by wall-clock adjustments. `primaryInputTokens`, `primaryOutputTokens`, and `primaryCostUsd` cover the primary OMP response stream; `modelRequests` also includes extension-internal Refiner calls. `verificationDefectsCaught` is the count of failed qualifying verification attempts observed by the harness, not a proof that each failure was a distinct product defect. `regressionsAfterRefinement` counts component revisions rolled back after activation. `completePairs` counts task/model/replicate groups with all five conditions; `weakModelPairs` is the subset assigned to the configured weak tier.
 
 The hypothesis tool is for genuinely ambiguous work, not every task. A typical request can stay natural:
 
@@ -387,11 +389,10 @@ Implemented in `0.1.0`:
 - [x] Content-addressed adaptive components and executable state models
 - [x] Strict run manifests and focused compatibility/failure-recovery tests
 - [x] Source-bound `evidence-harness` skill with deterministic routing, provenance, and mutation checks
-- [x] Immutable, resumable five-condition ablation runner with a completed paired pilot
+- [x] Immutable, resumable five-condition ablation runner with a final 20-cell paired release gate
 
-Next gates:
+Optional follow-on gates:
 
-- [ ] Fresh multi-task release-gate report bound to the final harness hash
 - [ ] Canary evidence that the automatic Refiner improves outcomes without a model-capability floor regression
 - [ ] Optional container-backed executor before any generated code is treated as untrusted
 

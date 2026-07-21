@@ -10,6 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
+import { performance } from "node:perf_hooks";
 import { basename, dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson, hashJson, isoNow, sha256Bytes } from "./canonical.ts";
@@ -159,6 +160,7 @@ export interface EvaluationRunnerOptions {
   outputRoot?: string;
   keepWorkspaces?: boolean;
   clock?: () => number;
+  monotonicClock?: () => number;
 }
 
 export interface EvaluationSuiteResult {
@@ -1411,8 +1413,10 @@ async function executeEvaluationRun(
   options: EvaluationRunnerOptions,
 ): Promise<EvaluationRunV1> {
   const clock = options.clock ?? Date.now;
-  const started = clock();
-  const startedAt = new Date(started).toISOString();
+  const monotonicClock =
+    options.monotonicClock ?? performance.now.bind(performance);
+  const startedAt = new Date(clock()).toISOString();
+  const started = monotonicClock();
   let workspaceRoot: string | undefined;
   let isolatedConfigRoot: string | undefined;
   try {
@@ -1513,7 +1517,7 @@ async function executeEvaluationRun(
       actions: manifest?.metrics.actions ?? outputMetrics.actions,
       modelRequests:
         outputMetrics.modelRequests + (manifest?.metrics.modelRequests ?? 0),
-      elapsedMs: Math.max(0, clock() - started),
+      elapsedMs: Math.max(0, monotonicClock() - started),
     };
     if (!runSucceeded) {
       result.failureClass =
@@ -1580,7 +1584,7 @@ async function executeEvaluationRun(
       failureClass: "harness",
       actions: 0,
       modelRequests: 0,
-      elapsedMs: Math.max(0, clock() - started),
+      elapsedMs: Math.max(0, monotonicClock() - started),
       errorHash: hashJson({
         error:
           error instanceof Error

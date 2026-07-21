@@ -33,7 +33,7 @@
     },
     {
       "path": "docs/CURRENTPLAN.md",
-      "sha256": "9e9ae8a61233b08a2b2acd8e23d5bf6194f8afc0b77b2411856d93e726e9fe5c",
+      "sha256": "31a51679edf03b8512916915781638ab9d7e5185a1834a7667aed504419ab85c",
       "source_class": "primary",
       "role": "Release routing criteria, skill acceptance gate, and operational boundaries",
       "locators": ["Workstream G: hypothesis portfolio tool", "Acceptance gate"]

@@ -388,12 +388,20 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
   await chmod(fakeOmp, 0o700);
   const suite = suiteFixture(workspace);
   const outputRoot = join(root, "output");
+  let wallClock = Date.parse("2026-07-20T12:00:00.000Z");
+  let monotonicClock = 0;
   const first = await runEvaluationSuite(suite, {
     ompExecutable: fakeOmp,
     outputRoot,
     extensionPath: extension,
+    clock: () => (wallClock += 3_600_000),
+    monotonicClock: () => (monotonicClock += 25),
   });
   assert.equal(first.runs.length, 10);
+  assert.equal(
+    first.runs.every((run) => run.elapsedMs === 25),
+    true,
+  );
   const observedArguments = (await readFile(argumentsLog, "utf8"))
     .trim()
     .split("\n")
