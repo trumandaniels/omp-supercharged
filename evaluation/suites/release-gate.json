@@ -5,11 +5,13 @@
   "models": [
     {
       "id": "openai-codex/gpt-5.6-sol",
-      "tier": "strong"
+      "tier": "strong",
+      "thinkingLevel": "high"
     },
     {
       "id": "openai-codex/gpt-5.6-luna",
-      "tier": "weak"
+      "tier": "weak",
+      "thinkingLevel": "medium"
     }
   ],
   "conditions": ["stock", "ledger", "state", "refiner", "executable_model"],

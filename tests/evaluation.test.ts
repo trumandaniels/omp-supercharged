@@ -39,8 +39,16 @@ function suiteFixture(
     kind: "evaluation_suite",
     id: "fixture-ablation",
     models: [
-      { id: "provider/strong", tier: "strong" },
-      { id: "provider/weak", tier: "weak" },
+      {
+        id: "provider/strong",
+        tier: "strong",
+        thinkingLevel: "high",
+      },
+      {
+        id: "provider/weak",
+        tier: "weak",
+        thinkingLevel: "low",
+      },
     ],
     tasks: [
       {
@@ -179,6 +187,7 @@ function completedRun(
     condition: plan.condition,
     model: plan.model.id,
     modelTier: plan.model.tier,
+    modelThinkingLevel: plan.model.thinkingLevel,
     promptHash:
       "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     startedAt: "2026-07-20T12:00:00.000Z",
@@ -210,6 +219,10 @@ test("evaluation suites require matched strong and weak five-condition slices", 
   const suite = parseEvaluationSuite(suiteFixture());
   const plans = planEvaluationRuns(suite);
   assert.equal(plans.length, 10);
+  assert.deepEqual(
+    suite.models.map((model) => model.thinkingLevel),
+    ["high", "low"],
+  );
   assert.equal(new Set(plans.map((plan) => plan.id)).size, plans.length);
   assert.notDeepEqual(
     plans.slice(0, 5).map((plan) => plan.condition),
@@ -233,11 +246,19 @@ test("evaluation suites require matched strong and weak five-condition slices", 
   assert.equal(report.summaries.ledger?.meanVerificationDefectsCaught, 1);
 
   const noWeak = structuredClone(suiteFixture());
-  noWeak.models = [{ id: "provider/strong", tier: "strong" }];
+  noWeak.models = [
+    { id: "provider/strong", tier: "strong", thinkingLevel: "high" },
+  ];
   assert.throws(
     () => parseEvaluationSuite(noWeak),
     /at least two models|weak-model/u,
   );
+
+  const invalidThinking = structuredClone(suiteFixture()) as unknown as {
+    models: { thinkingLevel: string }[];
+  };
+  invalidThinking.models[1].thinkingLevel = "auto";
+  assert.throws(() => parseEvaluationSuite(invalidThinking), /thinkingLevel/u);
 
   for (const [command, args] of [
     ["npm", ["--test", "test.mjs"]],
@@ -344,16 +365,18 @@ test("result", async () => {
     "utf8",
   );
   const fakeOmp = join(root, "fake-omp.mjs");
+  const argumentsLog = join(root, "arguments.jsonl");
   await writeFile(
     fakeOmp,
     `#!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
   console.log("fake-omp 1.0");
   process.exit(0);
 }
+appendFileSync(${JSON.stringify(argumentsLog)}, JSON.stringify(args) + "\\n", "utf8");
 const cwdIndex = args.indexOf("--cwd");
 const cwd = args[cwdIndex + 1];
 writeFileSync(join(cwd, "result.txt"), "ready\\n", "utf8");
@@ -371,6 +394,19 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
     extensionPath: extension,
   });
   assert.equal(first.runs.length, 10);
+  const observedArguments = (await readFile(argumentsLog, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as string[]);
+  assert.equal(observedArguments.length, 10);
+  for (const args of observedArguments) {
+    const model = args[args.indexOf("--model") + 1];
+    const thinkingLevel = args[args.indexOf("--thinking") + 1];
+    assert.equal(
+      thinkingLevel,
+      suite.models.find((candidate) => candidate.id === model)?.thinkingLevel,
+    );
+  }
   assert.equal(
     first.runs
       .filter((run) => run.condition === "stock")

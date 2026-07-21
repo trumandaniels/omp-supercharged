@@ -20,7 +20,7 @@
     },
     {
       "path": "src/types.ts",
-      "sha256": "6ee2d00a7f9c9f24713f272172c4926d6d04a59ebf61ae14268342171695f362",
+      "sha256": "3d5efc8a39aaba0850ef4f8d033495581992aff7abd75b1d83d1322f485ce35f",
       "source_class": "primary",
       "role": "Versioned evidence, prediction, falsification-test, hypothesis, and persisted operation schemas",
       "locators": [
@@ -33,7 +33,7 @@
     },
     {
       "path": "docs/CURRENTPLAN.md",
-      "sha256": "1427cf55303b574ca264c9157937f9298fcfdc63fc6ef7514e8d7b549d3677b6",
+      "sha256": "9e9ae8a61233b08a2b2acd8e23d5bf6194f8afc0b77b2411856d93e726e9fe5c",
       "source_class": "primary",
       "role": "Release routing criteria, skill acceptance gate, and operational boundaries",
       "locators": ["Workstream G: hypothesis portfolio tool", "Acceptance gate"]

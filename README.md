@@ -192,6 +192,7 @@ The overlay sets parent-session approval to `write`, limits tool timeouts and su
 ### Comparative evaluation
 
 The checked-in release gate runs every task/model pair through the same five cumulative conditions. Condition order rotates across pairs to reduce order bias; every run receives a fresh copy of the fixture workspace and the same deterministic verifier.
+Model slices pin an explicit thinking level instead of inheriting ambient role defaults; the checked-in gate uses `high` for the strong tier and `medium` for the weak tier to measure a lower-cost control path without the weak tier's observed high-thinking stalls or low-thinking accuracy loss.
 Each task's verifier must declare a nonempty `immutablePaths` list of safe relative files (such as `test.mjs`); the runner requires those files to remain regular, non-symlink files with byte-identical contents from the pristine workspace through agent completion.
 
 ```bash
@@ -202,7 +203,7 @@ The runner rejects incomplete suites, duplicate cells, unsafe bare package-manag
 
 A cell succeeds only when OMP emits a non-error provider response, the process protocol remains well formed, the immutable verifier passes, and every non-stock manifest reconstructs exactly from its ledger. Failed cells are classified as `provider`, `harness`, or `task`; the CLI still writes the resumable report, prints each failure count, and exits nonzero so infrastructure outages cannot masquerade as model or task failures.
 
-Reports contain hashes and aggregate metrics, not captured model prose or tool bodies. `primaryInputTokens`, `primaryOutputTokens`, and `primaryCostUsd` cover the primary OMP response stream; `modelRequests` also includes extension-internal Refiner calls. `verificationDefectsCaught` is the count of failed qualifying verification attempts observed by the harness, not a proof that each failure was a distinct product defect. `regressionsAfterRefinement` counts component revisions rolled back after activation. `completePairs` counts task/model/replicate groups with all five conditions; `weakModelPairs` is the subset assigned to the configured weak tier.
+Reports contain hashes and aggregate metrics, not captured model prose or tool bodies. Each cell records its configured `modelThinkingLevel`. `primaryInputTokens`, `primaryOutputTokens`, and `primaryCostUsd` cover the primary OMP response stream; `modelRequests` also includes extension-internal Refiner calls. `verificationDefectsCaught` is the count of failed qualifying verification attempts observed by the harness, not a proof that each failure was a distinct product defect. `regressionsAfterRefinement` counts component revisions rolled back after activation. `completePairs` counts task/model/replicate groups with all five conditions; `weakModelPairs` is the subset assigned to the configured weak tier.
 
 The hypothesis tool is for genuinely ambiguous work, not every task. A typical request can stay natural:
 

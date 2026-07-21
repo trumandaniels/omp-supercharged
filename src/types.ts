@@ -528,11 +528,20 @@ export interface RunManifestV1 {
 }
 
 export type EvaluationModelTier = "strong" | "weak";
+export type EvaluationThinkingLevel =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 export type EvaluationFailureClass = "provider" | "harness" | "task";
 
 export interface EvaluationModelV1 {
   id: string;
   tier: EvaluationModelTier;
+  thinkingLevel: EvaluationThinkingLevel;
 }
 
 export interface EvaluationVerifierV1 {
@@ -580,6 +589,7 @@ export interface EvaluationRunV1 extends EvaluationExecutionIdentityV1 {
   condition: EvaluationPolicyV1["condition"];
   model: string;
   modelTier: EvaluationModelTier;
+  modelThinkingLevel: EvaluationThinkingLevel;
   promptHash: string;
   startedAt: string;
   success: boolean;

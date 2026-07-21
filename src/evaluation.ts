@@ -29,6 +29,7 @@ import type {
   EvaluationReportV1,
   EvaluationRunV1,
   EvaluationSuiteV1,
+  EvaluationThinkingLevel,
   EvaluationTaskV1,
   JsonObject,
   RunManifestV1,
@@ -109,6 +110,31 @@ const EVALUATION_FAILURE_CLASSES = new Set<EvaluationFailureClass>([
   "harness",
   "task",
 ]);
+
+const EVALUATION_THINKING_LEVELS = new Set<EvaluationThinkingLevel>([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+function parseEvaluationThinkingLevel(
+  value: unknown,
+  context: string,
+): EvaluationThinkingLevel {
+  if (
+    typeof value !== "string" ||
+    !EVALUATION_THINKING_LEVELS.has(value as EvaluationThinkingLevel)
+  ) {
+    throw new TypeError(
+      `${context} must be off, minimal, low, medium, high, xhigh, or max`,
+    );
+  }
+  return value as EvaluationThinkingLevel;
+}
 
 interface EvaluationExecutionIdentity extends EvaluationExecutionIdentityV1 {
   specHash: string;
@@ -385,7 +411,11 @@ export function parseEvaluationSuite(
   const modelIds = new Set<string>();
   const models = suite.models.map((rawModel, index) => {
     const model = asRecord(rawModel, `Evaluation suite models[${index}]`);
-    assertExactKeys(model, ["id", "tier"], `Evaluation suite models[${index}]`);
+    assertExactKeys(
+      model,
+      ["id", "tier", "thinkingLevel"],
+      `Evaluation suite models[${index}]`,
+    );
     const modelId = nonEmptyString(
       model.id,
       `Evaluation suite models[${index}].id`,
@@ -405,7 +435,11 @@ export function parseEvaluationSuite(
         `Evaluation suite models[${index}].tier must be strong or weak`,
       );
     }
-    return { id: modelId, tier };
+    const thinkingLevel = parseEvaluationThinkingLevel(
+      model.thinkingLevel,
+      `Evaluation suite models[${index}].thinkingLevel`,
+    );
+    return { id: modelId, tier, thinkingLevel };
   });
   if (!models.some((model) => model.tier === "strong")) {
     throw new TypeError("Evaluation suite requires a strong-model slice");
@@ -1363,6 +1397,7 @@ function baseRun(
     condition: plan.condition,
     model: plan.model.id,
     modelTier: plan.model.tier,
+    modelThinkingLevel: plan.model.thinkingLevel,
     promptHash: hashJson({ prompt: plan.task.prompt }),
     startedAt,
   };
@@ -1402,6 +1437,8 @@ async function executeEvaluationRun(
     const args = [
       "--model",
       plan.model.id,
+      "--thinking",
+      plan.model.thinkingLevel,
       "--cwd",
       workspace.cwd,
       "--mode",
@@ -1585,6 +1622,7 @@ function validateStoredRun(
     "condition",
     "model",
     "modelTier",
+    "modelThinkingLevel",
     "promptHash",
     "startedAt",
     "success",
@@ -1624,6 +1662,10 @@ function validateStoredRun(
   const model = nonEmptyString(run.model, `${context}.model`, 200);
   const condition = parseCondition(run.condition, `${context}.condition`);
   const modelTier = run.modelTier;
+  const modelThinkingLevel = parseEvaluationThinkingLevel(
+    run.modelThinkingLevel,
+    `${context}.modelThinkingLevel`,
+  );
   if (modelTier !== "strong" && modelTier !== "weak") {
     throw new TypeError(`${context}.modelTier is invalid`);
   }
@@ -1632,6 +1674,7 @@ function validateStoredRun(
     model !== plan.model.id ||
     condition !== plan.condition ||
     modelTier !== plan.model.tier ||
+    modelThinkingLevel !== plan.model.thinkingLevel ||
     run.replicate !== plan.replicate ||
     run.promptHash !== hashJson({ prompt: plan.task.prompt })
   ) {
@@ -1664,6 +1707,7 @@ function validateStoredRun(
     condition,
     model,
     modelTier,
+    modelThinkingLevel,
     promptHash: contentHash(run.promptHash, `${context}.promptHash`),
     startedAt: timestamp(run.startedAt, `${context}.startedAt`),
     success: booleanValue(run.success, `${context}.success`),
