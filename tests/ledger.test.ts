@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { canonicalJson, hashJson } from "../src/canonical.ts";
+import { canonicalJson, hashJson, sha256Bytes } from "../src/canonical.ts";
 import { validateRunEvent } from "../src/event-schema.ts";
 import { recoverLedger, RunLedger } from "../src/ledger.ts";
 import { resolveRunPaths } from "../src/paths.ts";
@@ -183,8 +190,8 @@ test("ledger serializes concurrent appends, persists owner-only files, and expos
     appended.map((event) => event.sequence),
     Array.from({ length: 24 }, (_, index) => index + 2),
   );
-  await ledger.flush();
-  const events = await ledger.readCanonical();
+  const snapshot = await ledger.readSnapshot();
+  const events = snapshot.events;
   assert.equal(events.length, 25);
   assert.deepEqual(
     events.map((event) => event.sequence),
@@ -198,10 +205,46 @@ test("ledger serializes concurrent appends, persists owner-only files, and expos
     assert.equal((await stat(paths.ledgerPath)).mode & 0o777, 0o600);
   }
   const persisted = await readFile(paths.ledgerPath, "utf8");
+  assert.equal(snapshot.hash, sha256Bytes(persisted));
   assert.equal(persisted.split("\n").filter(Boolean).length, 25);
   await appendFile(paths.ledgerPath, '{"version":1', "utf8");
   const recovery = await recoverLedger(paths.ledgerPath);
   assert.equal(recovery.events.length, 25);
   assert.equal(recovery.truncatedTail, '{"version":1');
   await assert.rejects(RunLedger.create(paths), /truncated tail/u);
+});
+
+test("ledger recovery rejects noncanonical and malformed UTF-8 records", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "omp-supercharged-recovery-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const path = join(root, "events.jsonl");
+  const valid: RunEventV1 = {
+    ...runStartedDraft(),
+    version: 1,
+    eventId: "event-1",
+    runId: "run-recovery",
+    sequence: 1,
+    occurredAt: NOW,
+  } as RunEventV1;
+
+  const noncanonical = JSON.stringify(valid);
+  assert.notEqual(noncanonical, canonicalJson(valid));
+  await writeFile(path, `${noncanonical}\n`, "utf8");
+  await assert.rejects(recoverLedger(path), /not canonical JSON/u);
+
+  const malformed = Buffer.from(`${canonicalJson(valid)}\n`, "utf8");
+  const marker = malformed.indexOf(Buffer.from("session-test"));
+  assert.notEqual(marker, -1);
+  malformed[marker + "session-".length] = 0xff;
+  await writeFile(path, malformed);
+  await assert.rejects(recoverLedger(path), /not valid UTF-8/u);
+
+  const truncated = Buffer.concat([
+    Buffer.from(`${canonicalJson(valid)}\n`, "utf8"),
+    Buffer.from([0xe2, 0x82]),
+  ]);
+  await writeFile(path, truncated);
+  const recovery = await recoverLedger(path);
+  assert.equal(recovery.events.length, 1);
+  assert.notEqual(recovery.truncatedTail, undefined);
 });

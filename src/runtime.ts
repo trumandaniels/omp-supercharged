@@ -701,7 +701,7 @@ export class HarnessRuntime {
                 freshnessEpoch: this.state.verification.mutationEpoch,
               }
             : input;
-        const previous = cloneJson(this.state);
+        const previous = this.cloneStateForRefinerDetection();
         const claim = applyBeliefMutation(
           this.state.beliefs,
           mutation as BeliefMutationInput,
@@ -1150,7 +1150,7 @@ export class HarnessRuntime {
     const classification =
       metadata?.classification ?? classifyToolCall(event, this.policy);
     const success = !event.isError;
-    const previous = cloneJson(this.state);
+    const previous = this.cloneStateForRefinerDetection();
     const effect: TransitionEffect = !success
       ? "regression"
       : classification.classification === "mutation"
@@ -1414,11 +1414,10 @@ export class HarnessRuntime {
       !this.#state
     )
       throw new Error("Harness run is not initialized");
-    await this.ledger.flush();
-    const events = await this.ledger.readCanonical();
+    const { events, hash } = await this.ledger.readSnapshot();
     const manifest = deriveManifest(
       events,
-      await this.ledger.hash(),
+      hash,
       this.policy,
       { extensionVersion: EXTENSION_VERSION },
     );
@@ -1824,12 +1823,24 @@ export class HarnessRuntime {
     } satisfies ModelSessionEntryV1);
   }
 
+  private cloneStateForRefinerDetection(): HarnessStateV1 | undefined {
+    if (!this.ready || !this.hasFeature("refiner")) return undefined;
+    const policy = this.policy.refiner;
+    if (
+      !policy.enabled ||
+      policy.triggers.length === 0 ||
+      this.state.refinerRuns >= policy.maxRuns
+    )
+      return undefined;
+    return cloneJson(this.state);
+  }
+
   private scheduleDetectedRefiner(
-    previous: HarnessStateV1,
+    previous: HarnessStateV1 | undefined,
     latestEvent: RunEventV1,
     ctx?: ExtensionContext,
   ): void {
-    if (!this.ready || !this.hasFeature("refiner")) return;
+    if (!previous || !this.ready || !this.hasFeature("refiner")) return;
     const triggers = detectRefinerTriggers(
       previous,
       this.state,

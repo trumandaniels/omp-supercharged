@@ -1,5 +1,6 @@
 import { open, readFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
+import { TextDecoder } from "node:util";
 import {
   canonicalJson,
   isoNow,
@@ -17,24 +18,35 @@ export interface LedgerRecoveryV1 {
   truncatedTail?: string;
 }
 
-export async function recoverLedger(path: string): Promise<LedgerRecoveryV1> {
-  let content: string;
-  try {
-    content = await readFile(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT")
-      return { version: 1, events: [] };
-    throw error;
+const STRICT_UTF8_DECODER = new TextDecoder("utf-8", {
+  fatal: true,
+  ignoreBOM: true,
+});
+const LOSSY_UTF8_DECODER = new TextDecoder();
+
+function parseLedger(content: Uint8Array): LedgerRecoveryV1 {
+  if (content.byteLength === 0) return { version: 1, events: [] };
+  const lines: Uint8Array[] = [];
+  let lineStart = 0;
+  for (let index = 0; index < content.byteLength; index++) {
+    if (content[index] !== 0x0a) continue;
+    lines.push(content.subarray(lineStart, index));
+    lineStart = index + 1;
   }
-  if (content.length === 0) return { version: 1, events: [] };
-  const hasCompleteTail = content.endsWith("\n");
-  const lines = content.split("\n");
-  let truncatedTail: string | undefined;
-  if (hasCompleteTail) lines.pop();
-  else truncatedTail = lines.pop() ?? "";
+  const truncatedTail =
+    lineStart < content.byteLength
+      ? LOSSY_UTF8_DECODER.decode(content.subarray(lineStart))
+      : undefined;
   const events: RunEventV1[] = [];
   for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
+    let line: string;
+    try {
+      line = STRICT_UTF8_DECODER.decode(lines[index]);
+    } catch (error) {
+      throw new Error(
+        `Ledger line ${index + 1} is not valid UTF-8: ${String(error)}`,
+      );
+    }
     if (line.length === 0)
       throw new Error(`Ledger contains an empty line at ${index + 1}`);
     let parsed: unknown;
@@ -46,6 +58,8 @@ export async function recoverLedger(path: string): Promise<LedgerRecoveryV1> {
       );
     }
     validateRunEvent(parsed);
+    if (canonicalJson(parsed) !== line)
+      throw new Error(`Ledger line ${index + 1} is not canonical JSON`);
     const expectedSequence = index + 1;
     if (parsed.sequence !== expectedSequence)
       throw new Error(
@@ -58,6 +72,18 @@ export async function recoverLedger(path: string): Promise<LedgerRecoveryV1> {
   return truncatedTail === undefined
     ? { version: 1, events }
     : { version: 1, events, truncatedTail };
+}
+
+export async function recoverLedger(path: string): Promise<LedgerRecoveryV1> {
+  let content: Uint8Array;
+  try {
+    content = await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      return { version: 1, events: [] };
+    throw error;
+  }
+  return parseLedger(content);
 }
 
 export class RunLedger {
@@ -135,18 +161,17 @@ export class RunLedger {
         throw new Error(
           `Ledger is unhealthy: ${this.#failure ?? "unknown failure"}`,
         );
-      const event = {
+      const event = toCanonicalValue({
         ...draft,
         version: 1,
         eventId: this.#idFactory("event"),
         runId: this.runId,
         sequence: this.#sequence + 1,
         occurredAt: draft.occurredAt ?? isoNow(this.#clock),
-      } as RunEventV1;
-      toCanonicalValue(event);
+      });
       validateRunEvent(event);
       try {
-        await this.#handle.appendFile(`${canonicalJson(event)}\n`, "utf8");
+        await this.#handle.appendFile(`${JSON.stringify(event)}\n`, "utf8");
         if (critical) await this.#handle.sync();
         this.#sequence = event.sequence;
         return event;
@@ -172,17 +197,19 @@ export class RunLedger {
     await this.#handle.sync();
   }
 
-  async readCanonical(): Promise<RunEventV1[]> {
+  async readSnapshot(): Promise<{
+    events: RunEventV1[];
+    hash: string;
+  }> {
     await this.flush();
-    const recovery = await recoverLedger(this.paths.ledgerPath);
+    const content = await readFile(this.paths.ledgerPath);
+    const recovery = parseLedger(content);
     if (recovery.truncatedTail !== undefined)
       throw new Error("Ledger developed a truncated tail");
-    return recovery.events;
-  }
-
-  async hash(): Promise<string> {
-    await this.flush();
-    return sha256Bytes(await readFile(this.paths.ledgerPath));
+    return {
+      events: recovery.events,
+      hash: sha256Bytes(content),
+    };
   }
 
   async close(): Promise<void> {
